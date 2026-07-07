@@ -122,44 +122,59 @@ class Viewer(tk.Tk):
         ttk.Checkbutton(top, text="Hide helper bones", variable=self.hide_helpers,
                         command=self._toggle_helpers).pack(side="right")
 
-        # main split: left lists | 3d view
-        body = ttk.Frame(self)
+        # main split: [ left lists ] | [ 3d view ]  — draggable sash (resizable)
+        body = ttk.PanedWindow(self, orient="horizontal")
         body.pack(side="top", fill="both", expand=True)
 
-        left = ttk.Frame(body, padding=(8, 4))
-        left.pack(side="left", fill="y")
+        # left column: Clips over Bones, also a draggable vertical sash
+        left = ttk.PanedWindow(body, orient="vertical")
+        body.add(left, weight=0)
 
-        ttk.Label(left, text="Clips").pack(anchor="w")
-        cf = ttk.Frame(left)
-        cf.pack(fill="both", expand=True)
+        # --- Clips pane ---
+        cpane = ttk.Frame(left, padding=(8, 4))
+        left.add(cpane, weight=3)
+        ttk.Label(cpane, text="Clips").pack(anchor="w")
         self.filter_var = tk.StringVar()
-        fe = ttk.Entry(cf, textvariable=self.filter_var)
+        fe = ttk.Entry(cpane, textvariable=self.filter_var)
         fe.pack(fill="x")
         fe.bind("<KeyRelease>", lambda e: self._refill_clips())
-        self.clip_list = tk.Listbox(cf, width=30, height=18, activestyle="none",
+        cf = ttk.Frame(cpane)
+        cf.pack(fill="both", expand=True, pady=(3, 0))
+        self.clip_list = tk.Listbox(cf, width=42, height=18, activestyle="none",
                                     bg="#1b2028", fg=TEXT, selectbackground=ACCENT,
                                     selectforeground="#0b0e12", highlightthickness=0, exportselection=False)
-        self.clip_list.pack(side="left", fill="both", expand=True, pady=(3, 0))
-        csb = ttk.Scrollbar(cf, command=self.clip_list.yview)
-        csb.pack(side="right", fill="y")
-        self.clip_list.config(yscrollcommand=csb.set)
+        cvsb = ttk.Scrollbar(cf, orient="vertical", command=self.clip_list.yview)
+        chsb = ttk.Scrollbar(cf, orient="horizontal", command=self.clip_list.xview)
+        self.clip_list.config(yscrollcommand=cvsb.set, xscrollcommand=chsb.set)
+        self.clip_list.grid(row=0, column=0, sticky="nsew")
+        cvsb.grid(row=0, column=1, sticky="ns")
+        chsb.grid(row=1, column=0, sticky="ew")
+        cf.rowconfigure(0, weight=1)
+        cf.columnconfigure(0, weight=1)
         self.clip_list.bind("<<ListboxSelect>>", self._on_clip)
 
-        ttk.Label(left, text="Bones").pack(anchor="w", pady=(8, 0))
-        bf = ttk.Frame(left)
-        bf.pack(fill="both", expand=True)
-        self.bone_list = tk.Listbox(bf, width=30, height=14, activestyle="none",
+        # --- Bones pane ---
+        bpane = ttk.Frame(left, padding=(8, 4))
+        left.add(bpane, weight=2)
+        ttk.Label(bpane, text="Bones").pack(anchor="w")
+        bf = ttk.Frame(bpane)
+        bf.pack(fill="both", expand=True, pady=(3, 0))
+        self.bone_list = tk.Listbox(bf, width=42, height=12, activestyle="none",
                                     bg="#1b2028", fg=TEXT, selectbackground=SEL,
                                     selectforeground="#0b0e12", highlightthickness=0, exportselection=False)
-        self.bone_list.pack(side="left", fill="both", expand=True)
-        bsb = ttk.Scrollbar(bf, command=self.bone_list.yview)
-        bsb.pack(side="right", fill="y")
-        self.bone_list.config(yscrollcommand=bsb.set)
+        bvsb = ttk.Scrollbar(bf, orient="vertical", command=self.bone_list.yview)
+        bhsb = ttk.Scrollbar(bf, orient="horizontal", command=self.bone_list.xview)
+        self.bone_list.config(yscrollcommand=bvsb.set, xscrollcommand=bhsb.set)
+        self.bone_list.grid(row=0, column=0, sticky="nsew")
+        bvsb.grid(row=0, column=1, sticky="ns")
+        bhsb.grid(row=1, column=0, sticky="ew")
+        bf.rowconfigure(0, weight=1)
+        bf.columnconfigure(0, weight=1)
         self.bone_list.bind("<<ListboxSelect>>", self._on_bone)
 
-        # 3D canvas
-        self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
-        self.canvas.pack(side="left", fill="both", expand=True)
+        # 3D canvas (takes the extra space when the window is resized)
+        self.canvas = tk.Canvas(body, bg=BG, highlightthickness=0, width=760)
+        body.add(self.canvas, weight=1)
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<B1-Motion>", self._motion)
         self.canvas.bind("<ButtonRelease-1>", self._release)

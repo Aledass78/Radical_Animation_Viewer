@@ -42,8 +42,12 @@ python pure3d_anim_viewer.py path/to/file.p3d
 | Play / pause | **▶ Play** button or **Space** |
 | Step one frame | **←** / **→** |
 | Choose a clip | click it in **Clips** (type in the box to filter) |
+| See full clip names | drag the sash to widen the **Clips** panel, or use its horizontal scrollbar |
 | Open a file | **📂 Open .p3d** or **File ▸ Open** (Ctrl+O) |
 | Hide helper bones | checkbox, top-right (on by default) |
+
+The **Clips** / **Bones** panels are resizable — drag the sash between them, or the one between the
+lists and the 3D view.
 
 The **Bones** list tags each bone with the channels it animates in the current clip, e.g.
 `Pelvis [ROT+LOC]`, `Spine_1 [ROT]`, and marks helper bones with `·helper`.
