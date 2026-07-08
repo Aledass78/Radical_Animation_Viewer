@@ -71,6 +71,7 @@ class _BvhImportDialog(tk.Toplevel):
         self.mode = tk.StringVar(value="view")
         self.name_var = tk.StringVar(value=default_name)
         self.target_var = tk.StringVar(value=(clip_names[0] if clip_names else ""))
+        self.tmpl_var = tk.StringVar(value=(clip_names[0] if clip_names else ""))
         self.rx_var = tk.StringVar(value="0")
         self.ry_var = tk.StringVar(value="0")
         self.rz_var = tk.StringVar(value="0")
@@ -91,8 +92,14 @@ class _BvhImportDialog(tk.Toplevel):
         namef = ttk.Frame(frm)
         namef.pack(fill="x", anchor="w", padx=(24, 0))
         ttk.Label(namef, text="name:").pack(side="left")
-        self.name_entry = ttk.Entry(namef, textvariable=self.name_var, width=32)
+        self.name_entry = ttk.Entry(namef, textvariable=self.name_var, width=24)
         self.name_entry.pack(side="left", padx=(4, 0))
+        tmf = ttk.Frame(frm)
+        tmf.pack(fill="x", anchor="w", padx=(24, 0))
+        ttk.Label(tmf, text="structure like:").pack(side="left")
+        self.tmpl_combo = ttk.Combobox(tmf, textvariable=self.tmpl_var, values=clip_names,
+                                       width=28, state="readonly")
+        self.tmpl_combo.pack(side="left", padx=(4, 0))
 
         repf = ttk.Frame(frm)
         repf.pack(fill="x", anchor="w", pady=(6, 0))
@@ -135,12 +142,16 @@ class _BvhImportDialog(tk.Toplevel):
     def _sync(self):
         m = self.mode.get()
         self.name_entry.config(state="normal" if m == "add" else "disabled")
+        self.tmpl_combo.config(state="readonly" if m == "add" else "disabled")
         self.combo.config(state="readonly" if m == "replace" else "disabled")
 
     def _ok(self):
         m = self.mode.get()
         if m == "add" and not self.name_var.get().strip():
             messagebox.showwarning("Import BVH", "Enter a clip name.", parent=self)
+            return
+        if m == "add" and not self.tmpl_var.get():
+            messagebox.showwarning("Import BVH", "Choose a 'structure like' clip.", parent=self)
             return
         if m == "replace" and not self.target_var.get():
             messagebox.showwarning("Import BVH", "Choose a clip to replace.", parent=self)
@@ -151,7 +162,7 @@ class _BvhImportDialog(tk.Toplevel):
             except ValueError:
                 return 0.0
         self.result = {"action": m, "name": self.name_var.get().strip(),
-                       "target": self.target_var.get(),
+                       "target": self.target_var.get(), "template": self.tmpl_var.get(),
                        "rot": (f(self.rx_var), f(self.ry_var), f(self.rz_var))}
         self.destroy()
 
@@ -508,18 +519,19 @@ class Viewer(tk.Tk):
         clip_name = dlg.result["target"] if action == "replace" else dlg.result.get("name", default_name)
         try:
             channels, nframes, fps = pbvh.bvh_to_channels(bvh, rot=(0.0, 0.0, 0.0))
-            # Match the target clip's channel structure. Real game clips DON'T animate the root
-            # chain (Motion_Root/Balance_Root rotation) or every facial/helper bone — the world
-            # orientation comes from the engine + skeleton rest, not the anim. A BVH animates every
-            # bone, and writing root-chain rotation is what leaves the character rotated in-game.
-            # Restricting to exactly the bones/slots the replaced clip used keeps it game-faithful.
-            if action == "replace":
-                tgt = next((c for c in self.model.clips if c.name == clip_name), None)
-                if tgt is not None:
-                    template = {b: set(s.keys()) for b, s in tgt.channels.items()}
-                    channels = {b: {sl: v for sl, v in slots.items() if sl in template.get(b, ())}
-                                for b, slots in channels.items() if b in template}
-                    channels = {b: s for b, s in channels.items() if s}
+            # ALWAYS match a real clip's channel structure. Real game clips DON'T animate the root
+            # chain (Motion_Root/Balance_Root rotation+loc) or every facial/helper bone — the world
+            # orientation/position comes from the engine + skeleton rest, not the anim. A BVH
+            # animates every bone; writing root-chain loc/rot is what makes an "Add" clip oversized,
+            # off-ground and rotated. Restrict to exactly the bones/slots of a reference clip:
+            #   REPLACE -> the clip being replaced;  ADD -> the chosen "structure like" clip.
+            tmpl_name = clip_name if action == "replace" else dlg.result.get("template", "")
+            tgt = next((c for c in self.model.clips if c.name == tmpl_name), None)
+            if tgt is not None:
+                template = {b: set(s.keys()) for b, s in tgt.channels.items()}
+                channels = {b: {sl: v for sl, v in slots.items() if sl in template.get(b, ())}
+                            for b, slots in channels.items() if b in template}
+                channels = {b: s for b, s in channels.items() if s}
             # Manual whole-animation rotation AFTER structure-matching, using the TARGET skeleton
             # hierarchy so it lands on the real orientation-root body bones (not the dropped root
             # chain). 0/0/0 = no change.
@@ -541,10 +553,9 @@ class Viewer(tk.Tk):
         try:
             if action == "add":
                 pwrite.inject_clips(self.src_path, [clip], out)
-                msg = ("Added new clip '%s'.\n\nNote: a NEW clip animates every BVH bone incl. the "
-                       "root chain, which the game may re-orient. For in-game use, REPLACE an "
-                       "existing clip instead — that matches the game's expected channel structure."
-                       % dlg.result.get("name", default_name))
+                msg = ("Added new clip '%s' (structured like '%s' — root-chain channels dropped so "
+                       "it stays grounded and correctly sized)."
+                       % (dlg.result.get("name", default_name), dlg.result.get("template", "")))
             else:
                 ok = pwrite.replace_clip(self.src_path, dlg.result["target"], clip, out)
                 msg = ("Replaced clip '%s' (matched its channel structure — root-chain rotation "

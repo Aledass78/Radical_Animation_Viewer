@@ -77,7 +77,9 @@ The **Bones** list tags each bone with the channels it animates in the current c
 own **Export BVH**, …) and offers three actions:
 
 - **View it** — loads the BVH as a skeleton + clip and plays it in the viewer, no `.p3d` needed.
-- **Add as a NEW clip** to the currently-loaded `.p3d` (you name it) → saves a new `.p3d`.
+- **Add as a NEW clip** to the currently-loaded `.p3d` — you name it and pick a **"structure like"**
+  existing clip; the new clip copies that clip's channel set (so it drops the root chain and stays
+  grounded/correct-sized, instead of writing the full BVH skeleton). Saves a new `.p3d`.
 - **REPLACE an existing clip** (pick it from the list) → saves a new `.p3d`; the new clip keeps the
   replaced clip's **name** so it occupies the same animation slot.
 
