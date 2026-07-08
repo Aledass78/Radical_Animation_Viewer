@@ -85,6 +85,20 @@ The reader (`p3d_bvh.py`) respects each joint's declared `CHANNELS` order and co
 quaternion; a BVH exported by this tool round-trips to the original pose (~3×10⁻⁶). Add/Replace are
 disabled until a character `.p3d` is loaded (that's the skeleton the clip is written against).
 
+**Coordinate fix (Blender / Z-up sources).** The game (and this viewer) are **Y-up**; Blender is
+**Z-up**. When Blender imports/exports a BVH it rotates the **entire coordinate system** Y-up→Z-up —
+offsets get rotated *and* every bone's rotation gets **conjugated** (a change of basis). The dialog's
+**Coordinate fix — rotate axes X / Y / Z** (degrees) undoes this: enter **X = −90** for a Z-up
+Blender source, **0** for anything that came straight from the game. It's applied as a proper change
+of basis to every bone, so it fixes both the orientation **and** the per-bone twist.
+
+> **BVH through Blender — now handled.** Earlier this produced twisted arms/head (and sank the root
+> below ground): Blender's Z-up conversion left every bone rolled 90° about its own axis — invisible
+> in a stick-figure view but it twists the skinned mesh in-game. Import with **X = −90** and it's
+> recovered **exactly** (verified 0.00° per-bone vs the original, twist included). Note Blender may
+> also **resample** the clip (e.g. 410 frames @30 → 250 @24); set your Blender scene to 30 fps and the
+> right frame range to keep the timing.
+
 ## Importing / writing back into `.p3d`
 
 **File ▸ Import / Write** can put animation **back into** the Pure3D container (via `p3d_write.py`):

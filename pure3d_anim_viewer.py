@@ -71,6 +71,9 @@ class _BvhImportDialog(tk.Toplevel):
         self.mode = tk.StringVar(value="view")
         self.name_var = tk.StringVar(value=default_name)
         self.target_var = tk.StringVar(value=(clip_names[0] if clip_names else ""))
+        self.rx_var = tk.StringVar(value="0")
+        self.ry_var = tk.StringVar(value="0")
+        self.rz_var = tk.StringVar(value="0")
 
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -109,6 +112,17 @@ class _BvhImportDialog(tk.Toplevel):
             ttk.Label(frm, text="(open a character .p3d first to add/replace clips)",
                       foreground=TEXT).pack(anchor="w", pady=(8, 0))
 
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(10, 6))
+        rotf = ttk.Frame(frm)
+        rotf.pack(fill="x", anchor="w")
+        ttk.Label(rotf, text="Coordinate fix — rotate axes (deg):").pack(side="left")
+        for lab, var in (("X", self.rx_var), ("Y", self.ry_var), ("Z", self.rz_var)):
+            ttk.Label(rotf, text=lab).pack(side="left", padx=(8, 1))
+            ttk.Entry(rotf, textvariable=var, width=5).pack(side="left")
+        ttk.Label(frm, text="0 = as-is (game clips need none). A Z-up (Blender) source needs X = -90 "
+                            "(fixes orientation AND the per-bone twist).",
+                  foreground=TEXT).pack(anchor="w", pady=(3, 0))
+
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(12, 0))
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
@@ -131,8 +145,14 @@ class _BvhImportDialog(tk.Toplevel):
         if m == "replace" and not self.target_var.get():
             messagebox.showwarning("Import BVH", "Choose a clip to replace.", parent=self)
             return
+        def f(v):
+            try:
+                return float(v.get())
+            except ValueError:
+                return 0.0
         self.result = {"action": m, "name": self.name_var.get().strip(),
-                       "target": self.target_var.get()}
+                       "target": self.target_var.get(),
+                       "rot": (f(self.rx_var), f(self.ry_var), f(self.rz_var))}
         self.destroy()
 
 
@@ -469,11 +489,12 @@ class Viewer(tk.Tk):
         if not dlg.result:
             return
         action = dlg.result["action"]
+        rot = dlg.result.get("rot", (0.0, 0.0, 0.0))
 
         if action == "view":
             try:
                 model, fps = pbvh.bvh_to_model(bvh, source=os.path.basename(path),
-                                               clip_name=default_name)
+                                               clip_name=default_name, rot=rot)
             except Exception as e:
                 messagebox.showerror("Import BVH failed", str(e))
                 return
@@ -486,7 +507,24 @@ class Viewer(tk.Tk):
         # a replacement keeps the TARGET clip's name so it occupies the same animation slot
         clip_name = dlg.result["target"] if action == "replace" else dlg.result.get("name", default_name)
         try:
-            channels, nframes, fps = pbvh.bvh_to_channels(bvh)
+            channels, nframes, fps = pbvh.bvh_to_channels(bvh, rot=(0.0, 0.0, 0.0))
+            # Match the target clip's channel structure. Real game clips DON'T animate the root
+            # chain (Motion_Root/Balance_Root rotation) or every facial/helper bone — the world
+            # orientation comes from the engine + skeleton rest, not the anim. A BVH animates every
+            # bone, and writing root-chain rotation is what leaves the character rotated in-game.
+            # Restricting to exactly the bones/slots the replaced clip used keeps it game-faithful.
+            if action == "replace":
+                tgt = next((c for c in self.model.clips if c.name == clip_name), None)
+                if tgt is not None:
+                    template = {b: set(s.keys()) for b, s in tgt.channels.items()}
+                    channels = {b: {sl: v for sl, v in slots.items() if sl in template.get(b, ())}
+                                for b, slots in channels.items() if b in template}
+                    channels = {b: s for b, s in channels.items() if s}
+            # Manual whole-animation rotation AFTER structure-matching, using the TARGET skeleton
+            # hierarchy so it lands on the real orientation-root body bones (not the dropped root
+            # chain). 0/0/0 = no change.
+            if any(rot):
+                pbvh.apply_rotation(channels, self.model.joints, rot[0], rot[1], rot[2])
             clip = pwrite.build_clip(clip_name, self.model.joints, channels, nframes,
                                      fps=fps, be=self.be)
         except Exception as e:
@@ -503,10 +541,15 @@ class Viewer(tk.Tk):
         try:
             if action == "add":
                 pwrite.inject_clips(self.src_path, [clip], out)
-                msg = "Added new clip '%s'." % dlg.result.get("name", default_name)
+                msg = ("Added new clip '%s'.\n\nNote: a NEW clip animates every BVH bone incl. the "
+                       "root chain, which the game may re-orient. For in-game use, REPLACE an "
+                       "existing clip instead — that matches the game's expected channel structure."
+                       % dlg.result.get("name", default_name))
             else:
                 ok = pwrite.replace_clip(self.src_path, dlg.result["target"], clip, out)
-                msg = ("Replaced clip '%s'." % dlg.result["target"]) if ok else \
+                msg = ("Replaced clip '%s' (matched its channel structure — root-chain rotation "
+                       "dropped so the character keeps the game's orientation)."
+                       % dlg.result["target"]) if ok else \
                       "Target clip not found; nothing replaced."
         except Exception as e:
             messagebox.showerror("Import BVH failed", str(e))

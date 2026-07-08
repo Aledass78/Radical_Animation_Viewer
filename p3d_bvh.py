@@ -121,6 +121,74 @@ def _mat_to_quat(M):
     return (x / nrm, y / nrm, z / nrm, w / nrm)
 
 
+# ------------------------------------------------------------------ manual rotation
+# The game + this viewer are Y-up; other tools (Blender = Z-up) differ. There's no reliable auto
+# convert (Blender also re-derives bone rolls), so the user dials in a whole-animation rotation
+# manually (e.g. X = -90 to stand up a Z-up source).
+def _qmul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz)
+
+
+def _parent_map(joints):
+    """name -> parent-name, from a list of core.Joint or BVH joint dicts."""
+    names, pars = [], []
+    for j in joints:
+        if isinstance(j, dict):
+            names.append(j["name"]); pars.append(j["parent"])
+        else:
+            names.append(j.name); pars.append(j.parent)
+    pm = {}
+    for i, nm in enumerate(names):
+        p = pars[i]
+        pm[nm] = names[p] if (i != 0 and isinstance(p, int) and 0 <= p < i) else None
+    return pm
+
+
+def _axis_quat(axis, deg):
+    r = math.radians(deg) * 0.5
+    s, c = math.sin(r), math.cos(r)
+    return {"x": (s, 0, 0, c), "y": (0, s, 0, c), "z": (0, 0, s, c)}[axis]
+
+
+def _euler_quat(ax, ay, az):
+    """(x,y,z,w) for R = Rx(ax) @ Ry(ay) @ Rz(az)  (degrees)."""
+    return _qmul(_axis_quat("x", ax), _qmul(_axis_quat("y", ay), _axis_quat("z", az)))
+
+
+def apply_rotation(channels, joints, ax, ay, az):
+    """Re-express the whole animation in a coordinate system rotated by (ax, ay, az) degrees about
+    X/Y/Z — a CHANGE OF BASIS, not a spin.
+
+    Tools like Blender author BVH in a Z-up world and, on import/export, rotate the ENTIRE
+    coordinate system (offsets get rotated; each bone's local rotation gets CONJUGATED). A naive
+    'rotate the root' only fixes the global facing while leaving every bone twisted about its own
+    axis (looks fine as a stick figure, but the skinned mesh is twisted in-game). The correct undo
+    is the inverse change of basis applied to EVERY bone: q -> Q q Q^-1, loc -> Q·loc, where Q is
+    the rotation. For a Z-up Blender source, X = -90 recovers the game frame exactly.
+
+    (`joints` is unused now — kept for call-compatibility.)"""
+    if not (ax or ay or az):
+        return
+    q = _euler_quat(ax, ay, az)
+    qi = (-q[0], -q[1], -q[2], q[3])                   # inverse of a unit quaternion
+    R = core._qmat_col((q[0], q[1], q[2], q[3]))       # 3x3 flat, for rotating loc vectors
+    for b in list(channels):
+        s = channels[b]
+        if "rot" in s:
+            fr, qs = s["rot"]
+            s["rot"] = (fr, [_qmul(q, _qmul(qq, qi)) for qq in qs])   # conjugation
+        if "loc" in s:
+            fr, vs = s["loc"]
+            s["loc"] = (fr, [(R[0] * v[0] + R[1] * v[1] + R[2] * v[2],
+                              R[3] * v[0] + R[4] * v[1] + R[5] * v[2],
+                              R[6] * v[0] + R[7] * v[1] + R[8] * v[2]) for v in vs])
+
+
 # ------------------------------------------------------------------ conversions
 def _iter_channels(bvh):
     """Yield (joint_index, {channel_name: column_index}) using the row layout of MOTION."""
@@ -135,12 +203,14 @@ def _iter_channels(bvh):
     return layout, col
 
 
-def bvh_to_channels(bvh):
+def bvh_to_channels(bvh, rot=(0.0, 0.0, 0.0)):
     """-> (channels{bone:{'rot':(frames,quats), 'loc':(frames,xyz)}}, num_frames, fps).
 
     rot = the joint's parent-local rotation quaternion (x,y,z,w) per frame.
     loc = OFFSET + position-channels (absolute parent-local translation) — only for joints that
-    actually carry position channels (root, translated bones)."""
+    actually carry position channels (root, translated bones).
+    rot=(ax,ay,az) -- optional manual rotation (degrees about world X/Y/Z) applied to the whole
+    animation (e.g. (-90,0,0) to stand up a Z-up source)."""
     joints = bvh["joints"]
     layout, ncol = _iter_channels(bvh)
     rows = [r for r in bvh["frames"] if len(r) >= ncol]
@@ -173,10 +243,12 @@ def bvh_to_channels(bvh):
             slots["loc"] = (frames, locs)
         if slots:
             channels[name] = slots
+    if rot and any(rot):
+        apply_rotation(channels, bvh["joints"], rot[0], rot[1], rot[2])
     return channels, nframes, fps
 
 
-def bvh_to_model(bvh, source="(BVH)", clip_name="bvh_clip"):
+def bvh_to_model(bvh, source="(BVH)", clip_name="bvh_clip", rot=(0.0, 0.0, 0.0)):
     """Build a core.Model (skeleton with identity-rest bones at the BVH offsets + one clip)."""
     joints = []
     for j in bvh["joints"]:
@@ -189,6 +261,6 @@ def bvh_to_model(bvh, source="(BVH)", clip_name="bvh_clip"):
         jt = core.Joint(j["name"], j["parent"] if j["parent"] >= 0 else 0, local)
         joints.append(jt)
     core._fill_bind(joints)
-    channels, nframes, fps = bvh_to_channels(bvh)
+    channels, nframes, fps = bvh_to_channels(bvh, rot=rot)
     clip = core.Clip(clip_name, channels)
     return core.Model(source, joints, source, [clip]), fps
