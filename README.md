@@ -44,6 +44,7 @@ python pure3d_anim_viewer.py path/to/file.p3d
 | Choose a clip | click it in **Clips** (type in the box to filter) |
 | See full clip names | drag the sash to widen the **Clips** panel, or use its horizontal scrollbar |
 | Open a file | **📂 Open .p3d** or **File ▸ Open** (Ctrl+O) |
+| Export the current clip | **💾 Export BVH** button, or **File ▸ Export** |
 | Hide helper bones | checkbox, top-right (on by default) |
 
 The **Clips** / **Bones** panels are resizable — drag the sash between them, or the one between the
@@ -51,6 +52,23 @@ lists and the 3D view.
 
 The **Bones** list tags each bone with the channels it animates in the current clip, e.g.
 `Pelvis [ROT+LOC]`, `Spine_1 [ROT]`, and marks helper bones with `·helper`.
+
+## Exporting
+
+**File ▸ Export** (or the **💾 Export BVH** button) writes the currently selected clip to:
+
+- **BVH** (`.bvh`) — **Blender-compatible** (and Maya / MotionBuilder / Unity / …). Import in
+  Blender with **File ▸ Import ▸ Motion Capture (.bvh)** — no addon needed. Rotation + root/bone
+  translation are baked to Euler; scale (rare, helper-bones only) is dropped. Coordinates are the
+  game's native Y-up, so leave Blender's **Y Up** import option on. The writer is verified by a
+  round-trip (re-parse + FK) to ~3×10⁻⁶ against the viewer's own pose.
+- **JSON** (`.json`) — a lossless dump of the decoded skeleton + channels (rotation quaternions,
+  translation, scale) for custom pipelines.
+- **ALL clips → BVH folder** — batch-writes one `.bvh` per clip.
+
+> For the highest-fidelity Blender path (quaternions, no Euler baking, plus scale), use the
+> bundled Blender addon instead: `P3DAddon` → *File ▸ Import ▸ Pure 3D Animation (.p3d)*, which
+> imports clips straight onto an armature as Actions. BVH is the portable, addon-free option.
 
 ## Helper bones
 

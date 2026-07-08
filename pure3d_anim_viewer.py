@@ -30,6 +30,7 @@ from tkinter import ttk, filedialog, messagebox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import p3d_core as core
+import p3d_export as pexport
 
 
 # --- colours (dark theme) ---
@@ -94,6 +95,12 @@ class Viewer(tk.Tk):
         fm = tk.Menu(m, tearoff=0)
         fm.add_command(label="Open .p3d…", command=self.open_dialog, accelerator="Ctrl+O")
         fm.add_separator()
+        ex = tk.Menu(fm, tearoff=0)
+        ex.add_command(label="Current clip → BVH (Blender / mocap)…", command=self.export_bvh)
+        ex.add_command(label="Current clip → JSON (decoded curves)…", command=self.export_json)
+        ex.add_command(label="ALL clips → BVH folder…", command=self.export_all_bvh)
+        fm.add_cascade(label="Export", menu=ex)
+        fm.add_separator()
         fm.add_command(label="Exit", command=self.destroy)
         m.add_cascade(label="File", menu=fm)
         hm = tk.Menu(m, tearoff=0)
@@ -116,6 +123,7 @@ class Viewer(tk.Tk):
         top = ttk.Frame(self, padding=(8, 6))
         top.pack(side="top", fill="x")
         ttk.Button(top, text="📂 Open .p3d", command=self.open_dialog).pack(side="left")
+        ttk.Button(top, text="💾 Export BVH", command=self.export_bvh).pack(side="left", padx=(6, 0))
         self.src_lbl = ttk.Label(top, text="no file loaded")
         self.src_lbl.pack(side="left", padx=12)
         self.hide_helpers = tk.BooleanVar(value=True)
@@ -223,6 +231,70 @@ class Viewer(tk.Tk):
                                           filetypes=[("Pure3D", "*.p3d"), ("All files", "*.*")])
         if path:
             self.load(path)
+
+    # ---------------------------------------------------------- export
+    def _safe_name(self, s):
+        return "".join(c if (c.isalnum() or c in "._-") else "_" for c in s)
+
+    def _current_clip_name(self):
+        return self.model.clips[self.clip_idx].name if self.model else ""
+
+    def export_bvh(self):
+        if not self.model:
+            messagebox.showinfo("Export", "Open a .p3d file first.")
+            return
+        clip = self.model.clips[self.clip_idx]
+        path = filedialog.asksaveasfilename(
+            title="Export clip to BVH (Blender: File ▸ Import ▸ Motion Capture)",
+            defaultextension=".bvh", initialfile=self._safe_name(clip.name) + ".bvh",
+            filetypes=[("Biovision Hierarchy", "*.bvh")])
+        if not path:
+            return
+        try:
+            n = pexport.export_bvh(self.model, self.clip_idx, path, fps=self.fps)
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+            return
+        self.status.config(text="Exported %d frames → %s" % (n, os.path.basename(path)))
+
+    def export_json(self):
+        if not self.model:
+            messagebox.showinfo("Export", "Open a .p3d file first.")
+            return
+        clip = self.model.clips[self.clip_idx]
+        path = filedialog.asksaveasfilename(
+            title="Export decoded clip to JSON",
+            defaultextension=".json", initialfile=self._safe_name(clip.name) + ".json",
+            filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            nb = pexport.export_json(self.model, self.clip_idx, path, fps=self.fps)
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+            return
+        self.status.config(text="Exported %d channel-bones → %s" % (nb, os.path.basename(path)))
+
+    def export_all_bvh(self):
+        if not self.model:
+            messagebox.showinfo("Export", "Open a .p3d file first.")
+            return
+        folder = filedialog.askdirectory(title="Choose a folder for one .bvh per clip")
+        if not folder:
+            return
+        n = 0
+        for ci in range(len(self.model.clips)):
+            fn = os.path.join(folder, self._safe_name(self.model.clips[ci].name) + ".bvh")
+            try:
+                pexport.export_bvh(self.model, ci, fn, fps=self.fps)
+                n += 1
+            except Exception:
+                pass
+            if ci % 25 == 0:
+                self.status.config(text="Exporting BVH… %d/%d" % (ci + 1, len(self.model.clips)))
+                self.update_idletasks()
+        messagebox.showinfo("Export", "Wrote %d BVH file(s) to\n%s" % (n, folder))
+        self.status.config(text="Exported %d BVH file(s)." % n)
 
     def load(self, path):
         self.status.config(text="Loading " + os.path.basename(path) + " …")

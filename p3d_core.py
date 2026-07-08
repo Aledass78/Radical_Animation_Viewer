@@ -32,6 +32,7 @@ STATIC_INDEX = ((1, 2), (0, 2), (0, 1))     # Constants.STATIC_INDEX (axis place
 
 # chunk id -> (role_kind, header_len, numframes_off, value_bytes, dof, decoder)
 _CH = {
+    0x00121105: ('rot', 12, 8, 16, 3, 'q4'),
     0x00121112: ('rot', 12, 8, 6, 3, 'q6'),
     0x00121114: ('rot', 12, 8, 3, 3, 'q3'),
     0x00121119: ('vec', 12, 8, 6, 3, 'h3'),
@@ -206,12 +207,16 @@ def _frames(buf, base, count, be):
 
 def _values(buf, vbase, count, dec, be):
     o = ">" if be else "<"
-    fmt = {'q6': 'hhh', 'q3': 'bbb', 'h3': 'eee', 'h2': 'ee', 'f3': 'fff', 'f2': 'ff', 'f1': 'f'}[dec]
-    step = {'q6': 6, 'q3': 3, 'h3': 6, 'h2': 4, 'f3': 12, 'f2': 8, 'f1': 4}[dec]
+    fmt = {'q4': 'ffff', 'q6': 'hhh', 'q3': 'bbb', 'h3': 'eee', 'h2': 'ee', 'f3': 'fff', 'f2': 'ff', 'f1': 'f'}[dec]
+    step = {'q4': 16, 'q6': 6, 'q3': 3, 'h3': 6, 'h2': 4, 'f3': 12, 'f2': 8, 'f1': 4}[dec]
     return [struct.unpack_from(o + fmt, buf, vbase + step * i) for i in range(count)]
 
 
 def _quat(vals, dec):
+    if dec == 'q4':                              # uncompressed (x,y,z,w)
+        x, y, z, w = vals
+        n = math.sqrt(x * x + y * y + z * z + w * w) or 1.0
+        return (x / n, y / n, z / n, w / n)
     if dec == 'q6':
         x, y, z = vals[0] / 32767.0, vals[1] / 32767.0, vals[2] / 32767.0
     else:
@@ -468,6 +473,31 @@ class Model:
         if not (0 <= clip_idx < len(self.clips)) or not (0 <= joint_idx < len(self.joints)):
             return set()
         return set(self.clips[clip_idx].channels.get(self.joints[joint_idx].name, {}).keys())
+
+    # ---- exporter accessors (per-joint LOCAL transform, no scale) ----
+    def rest_offset(self, i):
+        """Parent-local rest translation of joint i (the BVH OFFSET)."""
+        L = self._local_col[i]
+        return (L[3], L[7], L[11])
+
+    def local_rot_trans(self, clip_idx, i, frame):
+        """Animated LOCAL rotation matrix (flat9, column-vector) + translation for joint i,
+        sampled at `frame`. Falls back to the rest rotation/translation where no channel exists.
+        (Scale is intentionally excluded — for BVH/skeletal export.)"""
+        L = self._local_col[i]
+        slots = self.clips[clip_idx].channels.get(self.joints[i].name, {}) \
+            if 0 <= clip_idx < len(self.clips) else {}
+        if 'rot' in slots:
+            fr, q = slots['rot']
+            R = _qmat_col(_sample_quat(fr, q, frame))
+        else:
+            R = [L[0], L[1], L[2], L[4], L[5], L[6], L[8], L[9], L[10]]
+        if 'loc' in slots:
+            fr, v = slots['loc']
+            t = _sample_vec(fr, v, frame)
+        else:
+            t = (L[3], L[7], L[11])
+        return R, t
 
 
 def load_p3d(path):
