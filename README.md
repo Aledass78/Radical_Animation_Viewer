@@ -45,6 +45,7 @@ python pure3d_anim_viewer.py path/to/file.p3d
 | See full clip names | drag the sash to widen the **Clips** panel, or use its horizontal scrollbar |
 | Open a file | **📂 Open .p3d** or **File ▸ Open** (Ctrl+O) |
 | Export the current clip | **💾 Export BVH** button, or **File ▸ Export** |
+| Import a BVH | **📥 Import BVH** button, or **File ▸ Import / Write** |
 | Hide helper bones | checkbox, top-right (on by default) |
 
 The **Clips** / **Bones** panels are resizable — drag the sash between them, or the one between the
@@ -69,6 +70,40 @@ The **Bones** list tags each bone with the channels it animates in the current c
 > For the highest-fidelity Blender path (quaternions, no Euler baking, plus scale), use the
 > bundled Blender addon instead: `P3DAddon` → *File ▸ Import ▸ Pure 3D Animation (.p3d)*, which
 > imports clips straight onto an armature as Actions. BVH is the portable, addon-free option.
+
+## Importing BVH
+
+**📥 Import BVH** (button, or **File ▸ Import / Write**) reads a `.bvh` (from Blender, Maya, our
+own **Export BVH**, …) and offers three actions:
+
+- **View it** — loads the BVH as a skeleton + clip and plays it in the viewer, no `.p3d` needed.
+- **Add as a NEW clip** to the currently-loaded `.p3d` (you name it) → saves a new `.p3d`.
+- **REPLACE an existing clip** (pick it from the list) → saves a new `.p3d`; the new clip keeps the
+  replaced clip's **name** so it occupies the same animation slot.
+
+The reader (`p3d_bvh.py`) respects each joint's declared `CHANNELS` order and converts Euler →
+quaternion; a BVH exported by this tool round-trips to the original pose (~3×10⁻⁶). Add/Replace are
+disabled until a character `.p3d` is loaded (that's the skeleton the clip is written against).
+
+## Importing / writing back into `.p3d`
+
+**File ▸ Import / Write** can put animation **back into** the Pure3D container (via `p3d_write.py`):
+
+- **Import BVH…** — see above (view / add / replace).
+- **JSON clip → inject into loaded .p3d** — reads a clip JSON (as exported above), builds a valid
+  animation subtree, and appends it to the currently-loaded `.p3d`, saving a new file. Round-trip
+  **export JSON → edit → import → reopen** is verified.
+- **Re-save loaded .p3d (clips inline)** — rewrites the file with every clip converted to inline
+  channels (no ZLIB keyframe buffer).
+
+Everything is written **inline** (each channel carries its own `[frames][values]`) — the game's own
+channel format — and is validated byte-exactly against the originals (fully-inline clips re-encode
+byte-identical; buffered clips re-decode identically; injected files fully re-parse).
+
+> **Untested in-game.** The output is structurally valid and decoder-verified, but hasn't been
+> loaded in the actual game here. Injected clips likely need bone names that match the target
+> skeleton and a registered clip/animation-table entry to be usable in-game — treat that as
+> experimental. See `../docs/ANIMATION_FORMAT.md` §14.
 
 ## Helper bones
 

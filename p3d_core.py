@@ -508,15 +508,24 @@ def load_p3d(path):
     root, be = parse_bytes(raw)
     if root is None:
         raise ValueError("Not a valid Pure3D (.p3d) file.")
-    sk_name, joints = None, None
-    sk = next((c for c in walk(root) if c.chunk_id == SKEL), None)
-    if sk is not None:
-        sk_name, joints = parse_skeleton(sk)
+    # clips first, so we know which bones the animations actually drive
     clips = []
+    clip_bones = set()
     for a in walk(root):
         if a.chunk_id == ANIM and a.find(BONELIST) is not None:
             chans = decode_clip_channels(a)
             if chans:
                 clips.append(Clip(clip_name(a), chans))
+                clip_bones.update(chans.keys())
     clips.sort(key=lambda c: c.name)
+    # a file can hold several skeletons (e.g. a character + a prop like a tricorder). Pick the
+    # one whose joints best cover the clip bones, then by joint count — not just the first found.
+    sk_name, joints = None, None
+    skels = [parse_skeleton(c) for c in walk(root) if c.chunk_id == SKEL]
+    if skels:
+        def _score(item):
+            _nm, js = item
+            names = set(j.name for j in js)
+            return (len(clip_bones & names), len(js))
+        sk_name, joints = max(skels, key=_score)
     return sk_name, joints, clips, be

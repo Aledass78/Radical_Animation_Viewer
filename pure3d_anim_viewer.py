@@ -31,6 +31,8 @@ from tkinter import ttk, filedialog, messagebox
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import p3d_core as core
 import p3d_export as pexport
+import p3d_write as pwrite
+import p3d_bvh as pbvh
 
 
 # --- colours (dark theme) ---
@@ -55,6 +57,85 @@ def is_helper_bone(name):
     return any(tok in name for tok in HELPER_TOKENS)
 
 
+class _BvhImportDialog(tk.Toplevel):
+    """Modal: choose what to do with an imported BVH — view it, add it as a new clip, or
+    replace an existing clip in the loaded .p3d."""
+
+    def __init__(self, parent, has_target, clip_names, default_name, target_file):
+        super().__init__(parent)
+        self.title("Import BVH")
+        self.configure(bg=BG)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.result = None
+        self.mode = tk.StringVar(value="view")
+        self.name_var = tk.StringVar(value=default_name)
+        self.target_var = tk.StringVar(value=(clip_names[0] if clip_names else ""))
+
+        frm = ttk.Frame(self, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="What should we do with this BVH?").pack(anchor="w", pady=(0, 8))
+
+        ttk.Radiobutton(frm, text="View it in the viewer", variable=self.mode, value="view",
+                        command=self._sync).pack(anchor="w")
+
+        addf = ttk.Frame(frm)
+        addf.pack(fill="x", anchor="w", pady=(6, 0))
+        self.rb_add = ttk.Radiobutton(addf, text="Add as NEW clip to", variable=self.mode,
+                                      value="add", command=self._sync)
+        self.rb_add.pack(side="left")
+        ttk.Label(addf, text=(target_file or "—"), foreground=ACCENT).pack(side="left", padx=(4, 0))
+        namef = ttk.Frame(frm)
+        namef.pack(fill="x", anchor="w", padx=(24, 0))
+        ttk.Label(namef, text="name:").pack(side="left")
+        self.name_entry = ttk.Entry(namef, textvariable=self.name_var, width=32)
+        self.name_entry.pack(side="left", padx=(4, 0))
+
+        repf = ttk.Frame(frm)
+        repf.pack(fill="x", anchor="w", pady=(6, 0))
+        self.rb_rep = ttk.Radiobutton(repf, text="REPLACE existing clip", variable=self.mode,
+                                      value="replace", command=self._sync)
+        self.rb_rep.pack(side="left")
+        repline = ttk.Frame(frm)
+        repline.pack(fill="x", anchor="w", padx=(24, 0))
+        ttk.Label(repline, text="clip:").pack(side="left")
+        self.combo = ttk.Combobox(repline, textvariable=self.target_var, values=clip_names,
+                                  width=30, state="readonly")
+        self.combo.pack(side="left", padx=(4, 0))
+
+        if not has_target:
+            self.rb_add.config(state="disabled")
+            self.rb_rep.config(state="disabled")
+            ttk.Label(frm, text="(open a character .p3d first to add/replace clips)",
+                      foreground=TEXT).pack(anchor="w", pady=(8, 0))
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(12, 0))
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self.destroy).pack(side="right", padx=(0, 6))
+
+        self._sync()
+        self.grab_set()
+        self.update_idletasks()
+
+    def _sync(self):
+        m = self.mode.get()
+        self.name_entry.config(state="normal" if m == "add" else "disabled")
+        self.combo.config(state="readonly" if m == "replace" else "disabled")
+
+    def _ok(self):
+        m = self.mode.get()
+        if m == "add" and not self.name_var.get().strip():
+            messagebox.showwarning("Import BVH", "Enter a clip name.", parent=self)
+            return
+        if m == "replace" and not self.target_var.get():
+            messagebox.showwarning("Import BVH", "Choose a clip to replace.", parent=self)
+            return
+        self.result = {"action": m, "name": self.name_var.get().strip(),
+                       "target": self.target_var.get()}
+        self.destroy()
+
+
 class Viewer(tk.Tk):
     def __init__(self, initial=None):
         super().__init__()
@@ -64,6 +145,8 @@ class Viewer(tk.Tk):
         self.configure(bg=BG)
 
         self.model = None
+        self.src_path = None          # path of the loaded .p3d (injection target)
+        self.be = False               # endianness of the loaded .p3d
         self.clip_idx = 0
         self.frame = 0.0
         self.sel = 0
@@ -100,6 +183,11 @@ class Viewer(tk.Tk):
         ex.add_command(label="Current clip → JSON (decoded curves)…", command=self.export_json)
         ex.add_command(label="ALL clips → BVH folder…", command=self.export_all_bvh)
         fm.add_cascade(label="Export", menu=ex)
+        im = tk.Menu(fm, tearoff=0)
+        im.add_command(label="Import BVH… (view / add / replace)", command=self.import_bvh)
+        im.add_command(label="JSON clip → inject into loaded .p3d…", command=self.import_json_clip)
+        im.add_command(label="Re-save loaded .p3d (clips inline)…", command=self.resave_inline)
+        fm.add_cascade(label="Import / Write", menu=im)
         fm.add_separator()
         fm.add_command(label="Exit", command=self.destroy)
         m.add_cascade(label="File", menu=fm)
@@ -124,6 +212,7 @@ class Viewer(tk.Tk):
         top.pack(side="top", fill="x")
         ttk.Button(top, text="📂 Open .p3d", command=self.open_dialog).pack(side="left")
         ttk.Button(top, text="💾 Export BVH", command=self.export_bvh).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="📥 Import BVH", command=self.import_bvh).pack(side="left", padx=(6, 0))
         self.src_lbl = ttk.Label(top, text="no file loaded")
         self.src_lbl.pack(side="left", padx=12)
         self.hide_helpers = tk.BooleanVar(value=True)
@@ -296,6 +385,154 @@ class Viewer(tk.Tk):
         messagebox.showinfo("Export", "Wrote %d BVH file(s) to\n%s" % (n, folder))
         self.status.config(text="Exported %d BVH file(s)." % n)
 
+    # ---------------------------------------------------------- import / write
+    def import_json_clip(self):
+        if not getattr(self, "src_path", None):
+            messagebox.showinfo("Import", "Open a character .p3d first — the clip is injected into it.")
+            return
+        jpath = filedialog.askopenfilename(title="Choose a JSON clip (exported by this viewer)",
+                                           filetypes=[("JSON", "*.json"), ("All files", "*.*")])
+        if not jpath:
+            return
+        out = filedialog.asksaveasfilename(
+            title="Save new .p3d (loaded file + imported clip)",
+            defaultextension=".p3d",
+            initialfile=os.path.splitext(os.path.basename(self.src_path))[0] + "_plus.p3d",
+            filetypes=[("Pure3D", "*.p3d")])
+        if not out:
+            return
+        try:
+            clip = pwrite.clip_from_json(jpath, be=self.be)
+            pwrite.inject_clips(self.src_path, [clip], out)
+        except Exception as e:
+            messagebox.showerror("Import failed", str(e))
+            return
+        messagebox.showinfo("Import",
+                            "Wrote %s\n\nThe clip was appended to the loaded .p3d (inline channels). "
+                            "Open it here to verify." % os.path.basename(out))
+        self.status.config(text="Imported clip → " + os.path.basename(out))
+
+    def resave_inline(self):
+        """Re-write the loaded .p3d with every animation clip converted to inline channels."""
+        if not getattr(self, "src_path", None):
+            messagebox.showinfo("Write", "Open a .p3d first.")
+            return
+        out = filedialog.asksaveasfilename(
+            title="Re-save .p3d with clips inline",
+            defaultextension=".p3d",
+            initialfile=os.path.splitext(os.path.basename(self.src_path))[0] + "_inline.p3d",
+            filetypes=[("Pure3D", "*.p3d")])
+        if not out:
+            return
+        try:
+            with open(self.src_path, "rb") as f:
+                raw = f.read()
+            root, be = core.parse_bytes(raw)
+            fmt = ">III" if be else "<III"
+            parts = []
+            for c in root.children:
+                if c.chunk_id == core.ANIM and c.find(core.BONELIST) is not None:
+                    parts.append(pwrite.reencode_inline(c))
+                else:
+                    parts.append(pwrite._copy(c, be))
+            body = bytes(root.data) + b"".join(parts)
+            out_bytes = __import__("struct").pack(fmt, root.chunk_id, 12 + len(root.data), 12 + len(body)) + body
+            with open(out, "wb") as f:
+                f.write(out_bytes)
+        except Exception as e:
+            messagebox.showerror("Write failed", str(e))
+            return
+        messagebox.showinfo("Write", "Re-saved (clips inline) →\n" + os.path.basename(out))
+        self.status.config(text="Re-saved inline → " + os.path.basename(out))
+
+    # ---------------------------------------------------------- import BVH
+    def import_bvh(self):
+        path = filedialog.askopenfilename(title="Import BVH animation",
+                                          filetypes=[("Biovision Hierarchy", "*.bvh"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            bvh = pbvh.read_bvh(path)
+        except Exception as e:
+            messagebox.showerror("Import BVH failed", "Could not read %s:\n%s" % (os.path.basename(path), e))
+            return
+        if not bvh["joints"] or not bvh["frames"]:
+            messagebox.showwarning("Import BVH", "No hierarchy/motion found in the BVH.")
+            return
+
+        has_target = bool(getattr(self, "src_path", None))
+        clips = [c.name for c in self.model.clips] if self.model else []
+        default_name = self._safe_name(os.path.splitext(os.path.basename(path))[0])
+        dlg = _BvhImportDialog(self, has_target, clips, default_name,
+                               os.path.basename(self.src_path) if has_target else None)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        action = dlg.result["action"]
+
+        if action == "view":
+            try:
+                model, fps = pbvh.bvh_to_model(bvh, source=os.path.basename(path),
+                                               clip_name=default_name)
+            except Exception as e:
+                messagebox.showerror("Import BVH failed", str(e))
+                return
+            self.fps = fps
+            self.fps_var.set(fps)
+            self._show_bvh_model(model, os.path.basename(path), fps)
+            return
+
+        # action in ('add', 'replace') -> write into the loaded .p3d
+        # a replacement keeps the TARGET clip's name so it occupies the same animation slot
+        clip_name = dlg.result["target"] if action == "replace" else dlg.result.get("name", default_name)
+        try:
+            channels, nframes, fps = pbvh.bvh_to_channels(bvh)
+            clip = pwrite.build_clip(clip_name, self.model.joints, channels, nframes,
+                                     fps=fps, be=self.be)
+        except Exception as e:
+            messagebox.showerror("Import BVH failed", str(e))
+            return
+        out = filedialog.asksaveasfilename(
+            title="Save new .p3d",
+            defaultextension=".p3d",
+            initialfile=os.path.splitext(os.path.basename(self.src_path))[0]
+            + ("_plus.p3d" if action == "add" else "_edit.p3d"),
+            filetypes=[("Pure3D", "*.p3d")])
+        if not out:
+            return
+        try:
+            if action == "add":
+                pwrite.inject_clips(self.src_path, [clip], out)
+                msg = "Added new clip '%s'." % dlg.result.get("name", default_name)
+            else:
+                ok = pwrite.replace_clip(self.src_path, dlg.result["target"], clip, out)
+                msg = ("Replaced clip '%s'." % dlg.result["target"]) if ok else \
+                      "Target clip not found; nothing replaced."
+        except Exception as e:
+            messagebox.showerror("Import BVH failed", str(e))
+            return
+        messagebox.showinfo("Import BVH", "%s\nWrote %s" % (msg, os.path.basename(out)))
+        self.status.config(text="Imported BVH → " + os.path.basename(out))
+
+    def _show_bvh_model(self, model, label, fps):
+        """Install a Model built from a BVH for viewing (no .p3d injection target)."""
+        self.model = model
+        self.src_path = None            # a viewed BVH is not a .p3d injection target
+        self._helper = {i for i, j in enumerate(model.joints) if is_helper_bone(j.name)}
+        self.clip_idx = 0
+        self.frame = 0.0
+        self.playing = False
+        self.play_btn.config(text="▶ Play")
+        self.sel = self._default_sel()
+        self._refill_clips()
+        self._fill_bones()
+        self._select_clip_row(0)
+        self._sync_transport()
+        self.draw()
+        self.src_lbl.config(text="%s · BVH · %d clips · %d joints · %d fps"
+                            % (label, len(model.clips), len(model.joints), fps))
+        self.status.config(text="Loaded BVH: " + label)
+
     def load(self, path):
         self.status.config(text="Loading " + os.path.basename(path) + " …")
         self.update_idletasks()
@@ -327,6 +564,8 @@ class Viewer(tk.Tk):
             reused = True
 
         self.model = core.Model(os.path.basename(path), joints, name, clips)
+        self.src_path = path            # target for injecting clips back into a .p3d
+        self.be = be
         self._helper = {i for i, j in enumerate(self.model.joints) if is_helper_bone(j.name)}
         self.clip_idx = 0
         self.frame = 0.0
