@@ -371,6 +371,93 @@ def clip_names(src_path):
     return out
 
 
+# ------------------------------------------------------------------ in-memory document
+class Document:
+    """An editable .p3d held entirely in memory — no dependency on the file on disk.
+
+    Holds the file's top-level chunks as raw byte-blocks (byte-identical to the original, since the
+    container round-trips exactly). Clip edits mutate that list; `to_bytes()` re-assembles it. The
+    caller can snapshot()/restore() the child list for undo/redo (byte strings are immutable, so a
+    snapshot is just a shallow copy of the list)."""
+
+    def __init__(self, raw):
+        root, be = core.parse_bytes(raw)
+        if root is None:
+            raise ValueError("not a valid .p3d")
+        self.be = be
+        self.root_id = root.chunk_id
+        self.root_data = bytes(root.data)
+        self.children = [_copy(c, be) for c in root.children]   # list[bytes], one per top-level chunk
+
+    # ---- serialise ----
+    def to_bytes(self):
+        body = self.root_data + b"".join(self.children)
+        fmt = ">III" if self.be else "<III"
+        return struct.pack(fmt, self.root_id, 12 + len(self.root_data), 12 + len(body)) + body
+
+    # ---- undo/redo snapshots ----
+    def snapshot(self):
+        return list(self.children)
+
+    def restore(self, snap):
+        self.children = list(snap)
+
+    # ---- clip queries/edits ----
+    def _is_clip(self, cb):
+        return struct.unpack_from(">I" if self.be else "<I", cb, 0)[0] == ANIM
+
+    def _name_of(self, cb):
+        try:
+            c = core._parse(cb, 0, self.be)
+            if c.find(BONELIST) is not None:
+                return c.p3d_string(4)[0]
+        except Exception:
+            pass
+        return None
+
+    def _find(self, name):
+        for i, cb in enumerate(self.children):
+            if self._is_clip(cb) and self._name_of(cb) == name:
+                return i
+        return -1
+
+    def clip_names(self):
+        out = []
+        for cb in self.children:
+            if self._is_clip(cb):
+                nm = self._name_of(cb)
+                if nm is not None:
+                    out.append(nm)
+        return out
+
+    def add_clip(self, clip_bytes):
+        self.children.append(bytes(clip_bytes))
+        return True
+
+    def replace_clip(self, name, clip_bytes):
+        i = self._find(name)
+        if i < 0:
+            return False
+        self.children[i] = bytes(clip_bytes)
+        return True
+
+    def delete_clip(self, name):
+        i = self._find(name)
+        if i < 0:
+            return False
+        del self.children[i]
+        return True
+
+    def reencode_all_inline(self):
+        """Convert every animation clip in the document to inline channels (no ZLIB buffer)."""
+        for i, cb in enumerate(self.children):
+            if self._is_clip(cb):
+                c = core._parse(cb, 0, self.be)
+                if c.find(BONELIST) is not None:
+                    self.children[i] = reencode_inline(c)
+        return True
+
+
 # ------------------------------------------------------------------ inject into a .p3d
 def inject_clips(src_path, clip_bytes_list, out_path):
     """Append Animation clips (already-serialized 0x121000 bytes) to a copy of `src_path`.

@@ -176,7 +176,14 @@ class Viewer(tk.Tk):
         self.configure(bg=BG)
 
         self.model = None
-        self.src_path = None          # path of the loaded .p3d (injection target)
+        self.doc = None               # in-memory editable .p3d (p3d_write.Document)
+        self.file_path = None         # where Save writes (may not exist on disk yet)
+        self.dirty = False            # unsaved changes?
+        self.undo_stack = []          # list of Document child-snapshots
+        self.redo_stack = []
+        self._saved_children = []     # doc.children as of the last save/load (for the dirty flag)
+        self._last_joints = None      # last real skeleton (for animation-only packages)
+        self._last_name = None
         self.be = False               # endianness of the loaded .p3d
         self.clip_idx = 0
         self.frame = 0.0
@@ -208,6 +215,12 @@ class Viewer(tk.Tk):
         m = tk.Menu(self)
         fm = tk.Menu(m, tearoff=0)
         fm.add_command(label="Open .p3d…", command=self.open_dialog, accelerator="Ctrl+O")
+        fm.add_separator()
+        fm.add_command(label="Save", command=self.save, accelerator="Ctrl+S")
+        fm.add_command(label="Save As…", command=self.save_as, accelerator="Ctrl+Shift+S")
+        fm.add_separator()
+        fm.add_command(label="Undo", command=self.undo, accelerator="Ctrl+Z")
+        fm.add_command(label="Redo", command=self.redo, accelerator="Ctrl+Y")
         fm.add_separator()
         ex = tk.Menu(fm, tearoff=0)
         ex.add_command(label="Current clip → BVH (Blender / mocap)…", command=self.export_bvh)
@@ -242,8 +255,14 @@ class Viewer(tk.Tk):
         # top toolbar
         top = ttk.Frame(self, padding=(8, 6))
         top.pack(side="top", fill="x")
-        ttk.Button(top, text="📂 Open .p3d", command=self.open_dialog).pack(side="left")
-        ttk.Button(top, text="💾 Export BVH", command=self.export_bvh).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="📂 Open", command=self.open_dialog).pack(side="left")
+        ttk.Button(top, text="💾 Save", command=self.save).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="Save As", command=self.save_as).pack(side="left", padx=(6, 0))
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(top, text="↶ Undo", command=self.undo).pack(side="left")
+        ttk.Button(top, text="↷ Redo", command=self.redo).pack(side="left", padx=(6, 0))
+        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=6)
+        ttk.Button(top, text="📤 Export BVH", command=self.export_bvh).pack(side="left")
         ttk.Button(top, text="📥 Import BVH", command=self.import_bvh).pack(side="left", padx=(6, 0))
         ttk.Button(top, text="🗑 Delete clip", command=self.delete_selected_clip).pack(side="left", padx=(6, 0))
         self.src_lbl = ttk.Label(top, text="no file loaded")
@@ -335,9 +354,27 @@ class Viewer(tk.Tk):
 
     def _bind_keys(self):
         self.bind("<Control-o>", lambda e: self.open_dialog())
+        self.bind("<Control-s>", lambda e: self.save())
+        self.bind("<Control-S>", lambda e: self.save_as())          # Ctrl+Shift+S
+        self.bind("<Control-z>", lambda e: self.undo())
+        self.bind("<Control-y>", lambda e: self.redo())
+        self.bind("<Control-Z>", lambda e: self.redo())             # Ctrl+Shift+Z
         self.bind("<space>", lambda e: self.toggle_play())
         self.bind("<Left>", lambda e: self.step(-1))
         self.bind("<Right>", lambda e: self.step(1))
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        if self.dirty:
+            ans = messagebox.askyesnocancel("Unsaved changes",
+                                            "You have unsaved changes. Save before closing?")
+            if ans is None:            # Cancel
+                return
+            if ans:                    # Yes -> save; abort close if the save was cancelled
+                self.save()
+                if self.dirty:
+                    return
+        self.destroy()
 
     # -------------------------------------------------------------- loading
     def _find_default(self):
@@ -349,6 +386,9 @@ class Viewer(tk.Tk):
         return None
 
     def open_dialog(self):
+        if self.dirty and not messagebox.askyesno(
+                "Unsaved changes", "Opening another file discards unsaved changes. Continue?"):
+            return
         path = filedialog.askopenfilename(title="Open Pure3D file",
                                           filetypes=[("Pure3D", "*.p3d"), ("All files", "*.*")])
         if path:
@@ -420,89 +460,43 @@ class Viewer(tk.Tk):
 
     # ---------------------------------------------------------- import / write
     def import_json_clip(self):
-        if not getattr(self, "src_path", None):
-            messagebox.showinfo("Import", "Open a character .p3d first — the clip is injected into it.")
+        if not self.doc:
+            messagebox.showinfo("Import", "Open a character .p3d first — the clip is added to it.")
             return
         jpath = filedialog.askopenfilename(title="Choose a JSON clip (exported by this viewer)",
                                            filetypes=[("JSON", "*.json"), ("All files", "*.*")])
         if not jpath:
             return
-        out = filedialog.asksaveasfilename(
-            title="Save new .p3d (loaded file + imported clip)",
-            defaultextension=".p3d",
-            initialfile=os.path.splitext(os.path.basename(self.src_path))[0] + "_plus.p3d",
-            filetypes=[("Pure3D", "*.p3d")])
-        if not out:
-            return
         try:
             clip = pwrite.clip_from_json(jpath, be=self.be)
-            pwrite.inject_clips(self.src_path, [clip], out)
         except Exception as e:
             messagebox.showerror("Import failed", str(e))
             return
-        self.load(out)                      # refresh the clip list with the new clip
-        messagebox.showinfo("Import", "Imported clip into %s — it's now in the list."
-                            % os.path.basename(out))
-        self.status.config(text="Imported clip → " + os.path.basename(out))
+        name = self.doc._name_of(clip) or "(clip)"
+        if self._commit(lambda: self.doc.add_clip(clip), select_name=name):
+            self.status.config(text="Added clip '%s' (unsaved — use Save)." % name)
 
     def delete_selected_clip(self):
-        """Delete the currently selected clip from the loaded .p3d (writes a new file + refreshes)."""
-        if not getattr(self, "src_path", None) or not self.model or not self.model.clips:
+        """Delete the currently selected clip from the in-memory document (undoable; not saved yet)."""
+        if not self.doc or not self.model or not self.model.clips:
             messagebox.showinfo("Delete clip", "Open a .p3d and select a clip first.")
             return
         name = self.model.clips[self.clip_idx].name
-        if not messagebox.askyesno("Delete clip", "Delete clip '%s' from the file?" % name):
+        if not messagebox.askyesno("Delete clip", "Delete clip '%s'?\n\n(You can Undo, and nothing is "
+                                   "written until you Save.)" % name):
             return
-        out = filedialog.asksaveasfilename(
-            title="Save .p3d without '%s'" % name,
-            defaultextension=".p3d",
-            initialfile=os.path.splitext(os.path.basename(self.src_path))[0] + "_edit.p3d",
-            filetypes=[("Pure3D", "*.p3d")])
-        if not out:
-            return
-        try:
-            ok = pwrite.delete_clip(self.src_path, name, out)
-        except Exception as e:
-            messagebox.showerror("Delete failed", str(e))
-            return
-        if not ok:
+        if self._commit(lambda: self.doc.delete_clip(name)):
+            self.status.config(text="Deleted '%s' (unsaved — use Save; Undo to restore)." % name)
+        else:
             messagebox.showwarning("Delete clip", "Clip '%s' not found; nothing deleted." % name)
-            return
-        self.load(out)                      # refresh the list (clip is gone)
-        self.status.config(text="Deleted '%s' → %s" % (name, os.path.basename(out)))
 
     def resave_inline(self):
-        """Re-write the loaded .p3d with every animation clip converted to inline channels."""
-        if not getattr(self, "src_path", None):
+        """Convert every animation clip in the document to inline channels (in memory)."""
+        if not self.doc:
             messagebox.showinfo("Write", "Open a .p3d first.")
             return
-        out = filedialog.asksaveasfilename(
-            title="Re-save .p3d with clips inline",
-            defaultextension=".p3d",
-            initialfile=os.path.splitext(os.path.basename(self.src_path))[0] + "_inline.p3d",
-            filetypes=[("Pure3D", "*.p3d")])
-        if not out:
-            return
-        try:
-            with open(self.src_path, "rb") as f:
-                raw = f.read()
-            root, be = core.parse_bytes(raw)
-            fmt = ">III" if be else "<III"
-            parts = []
-            for c in root.children:
-                if c.chunk_id == core.ANIM and c.find(core.BONELIST) is not None:
-                    parts.append(pwrite.reencode_inline(c))
-                else:
-                    parts.append(pwrite._copy(c, be))
-            body = bytes(root.data) + b"".join(parts)
-            out_bytes = __import__("struct").pack(fmt, root.chunk_id, 12 + len(root.data), 12 + len(body)) + body
-            with open(out, "wb") as f:
-                f.write(out_bytes)
-        except Exception as e:
-            messagebox.showerror("Write failed", str(e))
-            return
-        messagebox.showinfo("Write", "Re-saved (clips inline) →\n" + os.path.basename(out))
-        self.status.config(text="Re-saved inline → " + os.path.basename(out))
+        if self._commit(lambda: self.doc.reencode_all_inline()):
+            self.status.config(text="Converted all clips to inline channels (unsaved — use Save).")
 
     # ---------------------------------------------------------- import BVH
     def import_bvh(self):
@@ -519,11 +513,11 @@ class Viewer(tk.Tk):
             messagebox.showwarning("Import BVH", "No hierarchy/motion found in the BVH.")
             return
 
-        has_target = bool(getattr(self, "src_path", None))
+        has_target = bool(self.doc)
         clips = [c.name for c in self.model.clips] if self.model else []
         default_name = self._safe_name(os.path.splitext(os.path.basename(path))[0])
         dlg = _BvhImportDialog(self, has_target, clips, default_name,
-                               os.path.basename(self.src_path) if has_target else None)
+                               self._src_name() if has_target else None)
         self.wait_window(dlg)
         if not dlg.result:
             return
@@ -570,40 +564,20 @@ class Viewer(tk.Tk):
         except Exception as e:
             messagebox.showerror("Import BVH failed", str(e))
             return
-        out = filedialog.asksaveasfilename(
-            title="Save new .p3d",
-            defaultextension=".p3d",
-            initialfile=os.path.splitext(os.path.basename(self.src_path))[0]
-            + ("_plus.p3d" if action == "add" else "_edit.p3d"),
-            filetypes=[("Pure3D", "*.p3d")])
-        if not out:
-            return
-        try:
-            if action == "add":
-                pwrite.inject_clips(self.src_path, [clip], out)
-                msg = ("Added new clip '%s' (structured like '%s' — root-chain channels dropped so "
-                       "it stays grounded and correctly sized)."
-                       % (dlg.result.get("name", default_name), dlg.result.get("template", "")))
-            else:
-                ok = pwrite.replace_clip(self.src_path, dlg.result["target"], clip, out)
-                msg = ("Replaced clip '%s' (matched its channel structure — root-chain rotation "
-                       "dropped so the character keeps the game's orientation)."
-                       % dlg.result["target"]) if ok else \
-                      "Target clip not found; nothing replaced."
-        except Exception as e:
-            messagebox.showerror("Import BVH failed", str(e))
-            return
-        # reload the file we just wrote so the new/updated clip shows in the list immediately
-        # (and further edits chain onto it), then jump to the affected clip.
-        self.load(out)
-        self._select_clip_by_name(clip_name)
-        messagebox.showinfo("Import BVH", "%s\nWrote %s" % (msg, os.path.basename(out)))
-        self.status.config(text="Imported BVH → " + os.path.basename(out))
+        # apply to the in-memory document (undoable; written only on Save)
+        if action == "add":
+            ok = self._commit(lambda: self.doc.add_clip(clip), select_name=clip_name)
+            note = "Added new clip '%s' (structured like '%s')." % (clip_name, dlg.result.get("template", ""))
+        else:
+            ok = self._commit(lambda: self.doc.replace_clip(clip_name, clip), select_name=clip_name)
+            note = "Replaced clip '%s'." % clip_name
+        if ok:
+            self.status.config(text=note + " Unsaved — use Save / Save As.")
 
     def _show_bvh_model(self, model, label, fps):
-        """Install a Model built from a BVH for viewing (no .p3d injection target)."""
+        """Install a Model built from a BVH for a transient preview (the loaded document, if any,
+        is untouched — Save still writes the .p3d, not this preview)."""
         self.model = model
-        self.src_path = None            # a viewed BVH is not a .p3d injection target
         self._helper = {i for i, j in enumerate(model.joints) if is_helper_bone(j.name)}
         self.clip_idx = 0
         self.frame = 0.0
@@ -620,65 +594,167 @@ class Viewer(tk.Tk):
         self.status.config(text="Loaded BVH: " + label)
 
     def load(self, path):
+        """Open a .p3d fully into memory (an editable Document). No further disk dependency."""
         self.status.config(text="Loading " + os.path.basename(path) + " …")
         self.update_idletasks()
         try:
-            name, joints, clips, be = core.load_p3d(path)
+            with open(path, "rb") as f:
+                raw = f.read()
+            doc = pwrite.Document(raw)
         except Exception as e:
             messagebox.showerror("Open failed", "Could not parse %s:\n%s" % (os.path.basename(path), e))
             self.status.config(text="Load failed.")
             return
+        self.doc = doc
+        self.file_path = path
+        self.dirty = False
+        self.undo_stack = []
+        self.redo_stack = []
+        self._saved_children = list(doc.children)
+        if self._rebuild_from_doc(source_label=os.path.basename(path)):
+            self.status.config(text="Loaded %d clip(s) into memory." % len(self.model.clips))
+
+    def _rebuild_from_doc(self, source_label=None, select_name=None):
+        """(Re)build the on-screen model from the in-memory document and refresh the UI.
+        Called on load and after every edit / undo / redo. Returns True on success."""
+        self.dirty = bool(self.doc) and (self.doc.children != self._saved_children)
+        try:
+            name, joints, clips, be = core.load_bytes(self.doc.to_bytes())
+        except Exception as e:
+            messagebox.showerror("Error", "Could not parse the in-memory document:\n%s" % e)
+            return False
         if not clips:
-            messagebox.showwarning("No animations", "No animation clips found in %s." % os.path.basename(path))
-            self.status.config(text="No animations.")
-            return
-
+            messagebox.showwarning("No animations", "No animation clips in the file.")
+            return False
         reused = False
-        if joints is None:
-            # animation-only package: reuse the skeleton already loaded
-            if self.model is None or not self.model.joints:
-                messagebox.showinfo(
-                    "No skeleton",
-                    "“%s” contains only animations (no skeleton).\n\n"
-                    "Load a character .p3d that has a skeleton first (e.g. alex.p3d), then "
-                    "open this animation package to play its clips on that skeleton."
-                    % os.path.basename(path))
-                self.status.config(text="No skeleton — load a character first.")
-                return
-            joints = self.model.joints
-            name = self.model.name
-            reused = True
+        cov = 1.0
+        if joints is None:                       # animation-only package -> reuse a real skeleton
+            if not self._last_joints:
+                messagebox.showinfo("No skeleton",
+                                    "This file has only animations (no skeleton). Open a character "
+                                    ".p3d first (e.g. alex.p3d), then open this package.")
+                return False
+            joints, name, reused = self._last_joints, self._last_name, True
+        else:
+            self._last_joints, self._last_name = joints, name
 
-        self.model = core.Model(os.path.basename(path), joints, name, clips)
-        self.src_path = path            # target for injecting clips back into a .p3d
+        prev = self.model.clips[self.clip_idx].name \
+            if (self.model and self.model.clips and 0 <= self.clip_idx < len(self.model.clips)) else None
         self.be = be
+        self.model = core.Model(source_label or self._src_name(), joints, name, clips)
+        if reused:
+            cov = self.model.bone_coverage()
+        self._reused = reused
+        self._cov = cov
         self._helper = {i for i, j in enumerate(self.model.joints) if is_helper_bone(j.name)}
-        self.clip_idx = 0
+        # pick a clip to show: the requested one, else keep the same clip if it still exists, else 0
+        want = select_name or prev
+        self.clip_idx = next((i for i, c in enumerate(clips) if c.name == want), 0)
         self.frame = 0.0
         self.playing = False
         self.play_btn.config(text="▶ Play")
         self.sel = self._default_sel()
         self.endian = "PS3 (big-endian)" if be else "PC (little-endian)"
-
-        cov = self.model.bone_coverage()
         self._refill_clips()
         self._fill_bones()
-        self._select_clip_row(0)
         self._sync_transport()
         self.draw()
-
-        srctxt = "%s · %s · %d clips · %d joints" % (
-            self.model.source, self.endian, len(clips), len(joints))
-        if reused:
-            srctxt += "  (reusing %s, %d%% bones matched)" % (name, round(cov * 100))
-        self.src_lbl.config(text=srctxt)
-        self.status.config(text="Loaded %d clip(s)." % len(clips))
+        self._update_src_label()
         if reused and cov < 0.5:
-            messagebox.showwarning(
-                "Bone mismatch",
-                "Only %d%% of the clip bones exist in the current skeleton (%s).\n\n"
-                "This package targets a different character rig — load that character "
-                "first for a correct pose." % (round(cov * 100), name))
+            messagebox.showwarning("Bone mismatch",
+                                   "Only %d%% of the clip bones exist in the current skeleton (%s)."
+                                   % (round(cov * 100), name))
+        return True
+
+    def _src_name(self):
+        return os.path.basename(self.file_path) if self.file_path else "(in memory)"
+
+    def _update_src_label(self):
+        if not self.model:
+            return
+        dot = "●  " if self.dirty else ""
+        extra = "  (reusing %s, %d%% bones)" % (self._last_name, round(getattr(self, "_cov", 1) * 100)) \
+            if getattr(self, "_reused", False) else ""
+        self.src_lbl.config(text="%s%s · %s · %d clips · %d joints%s"
+                            % (dot, self._src_name(), self.endian,
+                               len(self.model.clips), len(self.model.joints), extra))
+
+    # ---------------------------------------------------------- edit / undo / redo / save
+    def _commit(self, fn, select_name=None):
+        """Run fn() (which mutates self.doc and returns True on success), recording it for undo
+        and rebuilding the view. Nothing is written to disk — that's Save's job."""
+        if not self.doc:
+            messagebox.showinfo("Edit", "Open a .p3d first.")
+            return False
+        snap = self.doc.snapshot()
+        try:
+            ok = fn()
+        except Exception as e:
+            self.doc.restore(snap)
+            messagebox.showerror("Edit failed", str(e))
+            return False
+        if not ok:
+            return False
+        self.undo_stack.append(snap)
+        self.redo_stack.clear()
+        self._rebuild_from_doc(select_name=select_name)
+        return True
+
+    def undo(self):
+        if not self.doc or not self.undo_stack:
+            self.status.config(text="Nothing to undo.")
+            return
+        self.redo_stack.append(self.doc.snapshot())
+        self.doc.restore(self.undo_stack.pop())
+        self._rebuild_from_doc()
+        self.status.config(text="Undid change.")
+
+    def redo(self):
+        if not self.doc or not self.redo_stack:
+            self.status.config(text="Nothing to redo.")
+            return
+        self.undo_stack.append(self.doc.snapshot())
+        self.doc.restore(self.redo_stack.pop())
+        self._rebuild_from_doc()
+        self.status.config(text="Redid change.")
+
+    def save(self):
+        if not self.doc:
+            messagebox.showinfo("Save", "Open a .p3d first.")
+            return
+        if not self.file_path:
+            return self.save_as()
+        try:
+            with open(self.file_path, "wb") as f:
+                f.write(self.doc.to_bytes())
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+        self._saved_children = list(self.doc.children)
+        self.dirty = False
+        self._update_src_label()
+        self.status.config(text="Saved → " + os.path.basename(self.file_path))
+
+    def save_as(self):
+        if not self.doc:
+            messagebox.showinfo("Save As", "Open a .p3d first.")
+            return
+        path = filedialog.asksaveasfilename(title="Save .p3d as", defaultextension=".p3d",
+                                            initialfile=self._src_name(),
+                                            filetypes=[("Pure3D", "*.p3d")])
+        if not path:
+            return
+        try:
+            with open(path, "wb") as f:
+                f.write(self.doc.to_bytes())
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+        self.file_path = path
+        self._saved_children = list(self.doc.children)
+        self.dirty = False
+        self._update_src_label()
+        self.status.config(text="Saved → " + os.path.basename(path))
 
     def _default_sel(self):
         for want in ("Knee_L", "Elbow_L", "Head"):
@@ -708,21 +784,6 @@ class Viewer(tk.Tk):
 
     def _select_clip_row(self, clip_idx):
         self._refill_clips()
-
-    def _select_clip_by_name(self, name):
-        """Select a clip by name (used after add/replace so the new clip is shown)."""
-        if not self.model:
-            return
-        for i, c in enumerate(self.model.clips):
-            if c.name == name:
-                self.clip_idx = i
-                self.frame = 0.0
-                self.filter_var.set("")
-                self._refill_clips()
-                self._fill_bones()
-                self._sync_transport()
-                self.draw()
-                return
 
     def _fill_bones(self):
         self.bone_list.delete(0, "end")

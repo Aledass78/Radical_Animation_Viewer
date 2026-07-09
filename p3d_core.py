@@ -501,10 +501,15 @@ class Model:
 
 
 def load_p3d(path):
-    """Load a .p3d. Returns (skeleton_name_or_None, joints_or_None, clips[list[Clip]], big_endian).
-    joints is None when the file is an animation-only package (no 0x00023000)."""
+    """Load a .p3d from disk. See load_bytes for the return shape."""
     with open(path, "rb") as f:
         raw = f.read()
+    return load_bytes(raw)
+
+
+def load_bytes(raw):
+    """Parse .p3d bytes. Returns (skeleton_name_or_None, joints_or_None, clips[list[Clip]], big_endian).
+    joints is None when the data is an animation-only package (no 0x00023000)."""
     root, be = parse_bytes(raw)
     if root is None:
         raise ValueError("Not a valid Pure3D (.p3d) file.")

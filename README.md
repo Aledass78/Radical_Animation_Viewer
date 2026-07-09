@@ -43,8 +43,10 @@ python pure3d_anim_viewer.py path/to/file.p3d
 | Step one frame | **←** / **→** |
 | Choose a clip | click it in **Clips** (type in the box to filter) |
 | See full clip names | drag the sash to widen the **Clips** panel, or use its horizontal scrollbar |
-| Open a file | **📂 Open .p3d** or **File ▸ Open** (Ctrl+O) |
-| Export the current clip | **💾 Export BVH** button, or **File ▸ Export** |
+| Open a file | **📂 Open** or **File ▸ Open** (Ctrl+O) |
+| Save changes | **💾 Save** (Ctrl+S) / **Save As** (Ctrl+Shift+S) |
+| Undo / redo an edit | **↶ Undo** (Ctrl+Z) / **↷ Redo** (Ctrl+Y) |
+| Export the current clip | **📤 Export BVH** button, or **File ▸ Export** |
 | Import a BVH | **📥 Import BVH** button, or **File ▸ Import / Write** |
 | Delete the selected clip | **🗑 Delete clip** button, or **File ▸ Import / Write** |
 | Hide helper bones | checkbox, top-right (on by default) |
@@ -78,11 +80,14 @@ The **Bones** list tags each bone with the channels it animates in the current c
 own **Export BVH**, …) and offers three actions:
 
 - **View it** — loads the BVH as a skeleton + clip and plays it in the viewer, no `.p3d` needed.
-- **Add as a NEW clip** to the currently-loaded `.p3d` — you name it and pick a **"structure like"**
-  existing clip; the new clip copies that clip's channel set (so it drops the root chain and stays
-  grounded/correct-sized, instead of writing the full BVH skeleton). Saves a new `.p3d`.
-- **REPLACE an existing clip** (pick it from the list) → saves a new `.p3d`; the new clip keeps the
-  replaced clip's **name** so it occupies the same animation slot.
+- **Add as a NEW clip** to the loaded `.p3d` — you name it and pick a **"structure like"** existing
+  clip; the new clip copies that clip's channel set (so it drops the root chain and stays
+  grounded/correct-sized, instead of writing the full BVH skeleton).
+- **REPLACE an existing clip** (pick it from the list); the new clip keeps the replaced clip's
+  **name** so it occupies the same animation slot.
+
+Add/Replace apply to the **in-memory document** (see below) — undoable, and written only when you
+**Save**.
 
 The reader (`p3d_bvh.py`) respects each joint's declared `CHANNELS` order and converts Euler →
 quaternion; a BVH exported by this tool round-trips to the original pose (~3×10⁻⁶). Add/Replace are
@@ -102,25 +107,31 @@ of basis to every bone, so it fixes both the orientation **and** the per-bone tw
 > also **resample** the clip (e.g. 410 frames @30 → 250 @24); set your Blender scene to 30 fps and the
 > right frame range to keep the timing.
 
-## Importing / writing back into `.p3d`
+## Editing model — everything is in memory
 
-**File ▸ Import / Write** can put animation **back into** the Pure3D container (via `p3d_write.py`):
+Opening a `.p3d` reads it **entirely into memory** as an editable document (`p3d_write.Document`).
+From then on the tool has **no dependency on the file on disk** — you can move or delete the original
+and keep working; nothing is written until you **Save**.
+
+- **Add / Replace / Import / Delete / inline-convert** all mutate the in-memory document. The **Clips**
+  list refreshes instantly and the affected clip is auto-selected — no reopening.
+- **↶ Undo / ↷ Redo** (Ctrl+Z / Ctrl+Y) step through every edit; the title dot (`●`) marks unsaved
+  changes.
+- **💾 Save** (Ctrl+S) writes the whole document back to the current file (recreating it if it was
+  deleted). **Save As** (Ctrl+Shift+S) writes a copy and switches to it. Closing with unsaved changes
+  prompts you.
+
+**File ▸ Import / Write** (all now in-memory edits, via `p3d_write.py`):
 
 - **Import BVH…** — see above (view / add / replace).
-- **JSON clip → inject into loaded .p3d** — reads a clip JSON (as exported above), builds a valid
-  animation subtree, and appends it to the currently-loaded `.p3d`, saving a new file. Round-trip
-  **export JSON → edit → import → reopen** is verified.
-- **Re-save loaded .p3d (clips inline)** — rewrites the file with every clip converted to inline
-  channels (no ZLIB keyframe buffer).
-
-After any Add / Replace / import / delete, the tool **reloads the file it just wrote**, so the new
-state shows in the **Clips** list immediately (and the affected clip is auto-selected) — no need to
-reopen it. Further edits chain onto that saved file. **🗑 Delete clip** removes the selected clip and
-writes a new `.p3d` without it.
+- **JSON clip → inject** — reads a clip JSON (as exported above), builds a valid animation subtree,
+  and adds it to the document. Round-trip **export JSON → edit → import** is verified.
+- **Delete selected clip** — removes it from the document (undoable).
+- **Re-save (clips inline)** — converts every clip to inline channels (no ZLIB keyframe buffer).
 
 Everything is written **inline** (each channel carries its own `[frames][values]`) — the game's own
-channel format — and is validated byte-exactly against the originals (fully-inline clips re-encode
-byte-identical; buffered clips re-decode identically; injected files fully re-parse).
+channel format. The container round-trips **byte-identical** (an unedited Save reproduces the input
+exactly), and edited clips re-decode identically.
 
 > **Untested in-game.** The output is structurally valid and decoder-verified, but hasn't been
 > loaded in the actual game here. Injected clips likely need bone names that match the target
