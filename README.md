@@ -104,6 +104,12 @@ This replaced the old "structure like a template clip" filter. Validated by roun
 clips through export→import: a 180° **turn** keeps its grounded yaw and a parkour **back-flip** keeps
 its full jump arc, both frame-for-frame identical to the originals (feet + facing).
 
+**Raw import** (checkbox, off by default). Tick it to **skip the policy entirely** and write the BVH
+**exactly as authored** — keeps `Balance_Root`, `Motion_Root` pitch/roll, and every position channel.
+That's full control / lossless, but a Blender source (which writes a position channel on every bone,
+and can tilt the root) may come in **squashed or tipped** — the policy exists precisely to clean that
+up. Use raw when you know your channels are already game-shaped, or to inspect what the policy changes.
+
 The reader (`p3d_bvh.py`) respects each joint's declared `CHANNELS` order and converts Euler →
 quaternion; a BVH exported by this tool round-trips to the original pose (~3×10⁻⁶). Add/Replace are
 disabled until a character `.p3d` is loaded (that's the skeleton the clip is written against).

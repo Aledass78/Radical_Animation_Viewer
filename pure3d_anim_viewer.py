@@ -74,6 +74,7 @@ class _BvhImportDialog(tk.Toplevel):
         self.rx_var = tk.StringVar(value="0")
         self.ry_var = tk.StringVar(value="0")
         self.rz_var = tk.StringVar(value="0")
+        self.raw_var = tk.BooleanVar(value=False)
 
         frm = ttk.Frame(self, padding=12)
         frm.pack(fill="both", expand=True)
@@ -123,6 +124,15 @@ class _BvhImportDialog(tk.Toplevel):
                             "(fixes orientation AND the per-bone twist).",
                   foreground=TEXT).pack(anchor="w", pady=(3, 0))
 
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=(10, 6))
+        ttk.Checkbutton(frm, text="Raw import — keep ALL channels (no game policy)",
+                        variable=self.raw_var).pack(anchor="w")
+        ttk.Label(frm, text="Off (default): game-faithful — Balance_Root dropped, Motion_Root rotation "
+                            "constrained to a grounded yaw, redundant static translation removed.\n"
+                            "On: writes the BVH exactly as authored — keeps root pitch/roll & every "
+                            "position channel (may squash/tilt the character; use for full control).",
+                  foreground=TEXT, justify="left").pack(anchor="w", padx=(24, 0), pady=(2, 0))
+
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(12, 0))
         ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
@@ -151,7 +161,7 @@ class _BvhImportDialog(tk.Toplevel):
             except ValueError:
                 return 0.0
         self.result = {"action": m, "name": self.name_var.get().strip(),
-                       "target": self.target_var.get(),
+                       "target": self.target_var.get(), "raw": self.raw_var.get(),
                        "rot": (f(self.rx_var), f(self.ry_var), f(self.rz_var))}
         self.destroy()
 
@@ -538,20 +548,24 @@ class Viewer(tk.Tk):
             # (2) Game-faithful policy — keep body rotation exactly as authored (flips on
             #     Pelvis/Spine survive), keep Motion_Root FACING but constrain it to a grounded
             #     vertical yaw, and drop the reserved Balance_Root. This is what makes an imported
-            #     clip behave in-game like a shipped one, independent of any template.
-            channels = pbvh.game_faithful_filter(channels)
+            #     clip behave in-game like a shipped one, independent of any template. Skipped when
+            #     the user asks for a raw import (writes every channel exactly as authored).
+            if not dlg.result.get("raw"):
+                channels = pbvh.game_faithful_filter(channels)
             clip = pwrite.build_clip(clip_name, self.model.joints, channels, nframes,
                                      fps=fps, be=self.be)
         except Exception as e:
             messagebox.showerror("Import BVH failed", str(e))
             return
         # apply to the in-memory document (undoable; written only on Save)
+        mode_txt = "raw — all channels kept" if dlg.result.get("raw") else \
+                   "game-faithful — grounded-yaw root, body kept"
         if action == "add":
             ok = self._commit(lambda: self.doc.add_clip(clip), select_name=clip_name)
-            note = "Added new clip '%s' (game-faithful: body motion kept, root constrained to a grounded yaw)." % clip_name
+            note = "Added new clip '%s' (%s)." % (clip_name, mode_txt)
         else:
             ok = self._commit(lambda: self.doc.replace_clip(clip_name, clip), select_name=clip_name)
-            note = "Replaced clip '%s' (game-faithful root handling)." % clip_name
+            note = "Replaced clip '%s' (%s)." % (clip_name, mode_txt)
         if ok:
             self.status.config(text=note + " Unsaved — use Save / Save As.")
 
