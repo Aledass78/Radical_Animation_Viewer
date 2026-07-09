@@ -46,6 +46,7 @@ python pure3d_anim_viewer.py path/to/file.p3d
 | Open a file | **📂 Open .p3d** or **File ▸ Open** (Ctrl+O) |
 | Export the current clip | **💾 Export BVH** button, or **File ▸ Export** |
 | Import a BVH | **📥 Import BVH** button, or **File ▸ Import / Write** |
+| Delete the selected clip | **🗑 Delete clip** button, or **File ▸ Import / Write** |
 | Hide helper bones | checkbox, top-right (on by default) |
 
 The **Clips** / **Bones** panels are resizable — drag the sash between them, or the one between the
@@ -111,6 +112,11 @@ of basis to every bone, so it fixes both the orientation **and** the per-bone tw
   **export JSON → edit → import → reopen** is verified.
 - **Re-save loaded .p3d (clips inline)** — rewrites the file with every clip converted to inline
   channels (no ZLIB keyframe buffer).
+
+After any Add / Replace / import / delete, the tool **reloads the file it just wrote**, so the new
+state shows in the **Clips** list immediately (and the affected clip is auto-selected) — no need to
+reopen it. Further edits chain onto that saved file. **🗑 Delete clip** removes the selected clip and
+writes a new `.p3d` without it.
 
 Everything is written **inline** (each channel carries its own `[frames][values]`) — the game's own
 channel format — and is validated byte-exactly against the originals (fully-inline clips re-encode

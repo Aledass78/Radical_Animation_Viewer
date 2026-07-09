@@ -217,6 +217,7 @@ class Viewer(tk.Tk):
         im = tk.Menu(fm, tearoff=0)
         im.add_command(label="Import BVH… (view / add / replace)", command=self.import_bvh)
         im.add_command(label="JSON clip → inject into loaded .p3d…", command=self.import_json_clip)
+        im.add_command(label="Delete selected clip…", command=self.delete_selected_clip)
         im.add_command(label="Re-save loaded .p3d (clips inline)…", command=self.resave_inline)
         fm.add_cascade(label="Import / Write", menu=im)
         fm.add_separator()
@@ -244,6 +245,7 @@ class Viewer(tk.Tk):
         ttk.Button(top, text="📂 Open .p3d", command=self.open_dialog).pack(side="left")
         ttk.Button(top, text="💾 Export BVH", command=self.export_bvh).pack(side="left", padx=(6, 0))
         ttk.Button(top, text="📥 Import BVH", command=self.import_bvh).pack(side="left", padx=(6, 0))
+        ttk.Button(top, text="🗑 Delete clip", command=self.delete_selected_clip).pack(side="left", padx=(6, 0))
         self.src_lbl = ttk.Label(top, text="no file loaded")
         self.src_lbl.pack(side="left", padx=12)
         self.hide_helpers = tk.BooleanVar(value=True)
@@ -438,10 +440,36 @@ class Viewer(tk.Tk):
         except Exception as e:
             messagebox.showerror("Import failed", str(e))
             return
-        messagebox.showinfo("Import",
-                            "Wrote %s\n\nThe clip was appended to the loaded .p3d (inline channels). "
-                            "Open it here to verify." % os.path.basename(out))
+        self.load(out)                      # refresh the clip list with the new clip
+        messagebox.showinfo("Import", "Imported clip into %s — it's now in the list."
+                            % os.path.basename(out))
         self.status.config(text="Imported clip → " + os.path.basename(out))
+
+    def delete_selected_clip(self):
+        """Delete the currently selected clip from the loaded .p3d (writes a new file + refreshes)."""
+        if not getattr(self, "src_path", None) or not self.model or not self.model.clips:
+            messagebox.showinfo("Delete clip", "Open a .p3d and select a clip first.")
+            return
+        name = self.model.clips[self.clip_idx].name
+        if not messagebox.askyesno("Delete clip", "Delete clip '%s' from the file?" % name):
+            return
+        out = filedialog.asksaveasfilename(
+            title="Save .p3d without '%s'" % name,
+            defaultextension=".p3d",
+            initialfile=os.path.splitext(os.path.basename(self.src_path))[0] + "_edit.p3d",
+            filetypes=[("Pure3D", "*.p3d")])
+        if not out:
+            return
+        try:
+            ok = pwrite.delete_clip(self.src_path, name, out)
+        except Exception as e:
+            messagebox.showerror("Delete failed", str(e))
+            return
+        if not ok:
+            messagebox.showwarning("Delete clip", "Clip '%s' not found; nothing deleted." % name)
+            return
+        self.load(out)                      # refresh the list (clip is gone)
+        self.status.config(text="Deleted '%s' → %s" % (name, os.path.basename(out)))
 
     def resave_inline(self):
         """Re-write the loaded .p3d with every animation clip converted to inline channels."""
@@ -565,6 +593,10 @@ class Viewer(tk.Tk):
         except Exception as e:
             messagebox.showerror("Import BVH failed", str(e))
             return
+        # reload the file we just wrote so the new/updated clip shows in the list immediately
+        # (and further edits chain onto it), then jump to the affected clip.
+        self.load(out)
+        self._select_clip_by_name(clip_name)
         messagebox.showinfo("Import BVH", "%s\nWrote %s" % (msg, os.path.basename(out)))
         self.status.config(text="Imported BVH → " + os.path.basename(out))
 
@@ -676,6 +708,21 @@ class Viewer(tk.Tk):
 
     def _select_clip_row(self, clip_idx):
         self._refill_clips()
+
+    def _select_clip_by_name(self, name):
+        """Select a clip by name (used after add/replace so the new clip is shown)."""
+        if not self.model:
+            return
+        for i, c in enumerate(self.model.clips):
+            if c.name == name:
+                self.clip_idx = i
+                self.frame = 0.0
+                self.filter_var.set("")
+                self._refill_clips()
+                self._fill_bones()
+                self._sync_transport()
+                self.draw()
+                return
 
     def _fill_bones(self):
         self.bone_list.delete(0, "end")

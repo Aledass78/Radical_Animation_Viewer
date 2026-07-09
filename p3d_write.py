@@ -330,6 +330,32 @@ def replace_clip(src_path, target_name, new_clip_bytes, out_path):
     return done[0]
 
 
+def delete_clip(src_path, target_name, out_path):
+    """Remove the first Animation clip named `target_name` from the .p3d. Returns bool."""
+    with open(src_path, "rb") as f:
+        raw = f.read()
+    root, be = core.parse_bytes(raw)
+    if root is None:
+        raise ValueError("not a valid .p3d")
+    done = [False]
+
+    def tr(c):
+        if not done[0] and c.chunk_id == ANIM and c.find(BONELIST) is not None:
+            try:
+                nm = c.p3d_string(4)[0]
+            except Exception:
+                nm = None
+            if nm == target_name:
+                done[0] = True
+                return None                       # drop this chunk
+        return _copy(c, be)
+
+    out = _rebuild_root(root, be, tr)
+    with open(out_path, "wb") as f:
+        f.write(out)
+    return done[0]
+
+
 def clip_names(src_path):
     """List Animation clip names in a .p3d (in file order)."""
     with open(src_path, "rb") as f:
