@@ -189,6 +189,65 @@ def apply_rotation(channels, joints, ax, ay, az):
                               R[6] * v[0] + R[7] * v[1] + R[8] * v[2]) for v in vs])
 
 
+# ------------------------------------------------------------------ game-faithful channel policy
+# Names the game treats specially in the root region (verified across alex/alex_boss/evolved .p3d).
+ROOT_MOTION = "Motion_Root"        # world node: position + FACING; only ever yaws (never pitch/roll)
+ROOT_BALANCE = "Balance_Root"      # reserved balance/lean passthrough — never animated in any clip
+ROOT_CHARACTER = "Character_Root"  # base of the animated body (Pelvis + Spine hang off it)
+
+
+def _yaw_only(q):
+    """Project a quaternion to its rotation about the vertical (local Y) axis — swing/twist twist
+    part. The game turns a character purely by yawing Motion_Root about vertical, which preserves
+    height (feet stay grounded). Any pitch/roll on the root is not game-like, so we discard it."""
+    x, y, z, w = q
+    n = math.sqrt(y * y + w * w)
+    if n < 1e-8:                        # 180° about a horizontal axis -> no yaw component
+        return (0.0, 0.0, 0.0, 1.0)
+    return (0.0, y / n, 0.0, w / n)
+
+
+def _loc_moves(vs, eps=0.01):
+    """True if a translation channel actually moves over the clip (vs is a list of (x,y,z))."""
+    v0 = vs[0]
+    return max(math.dist(v, v0) for v in vs) > eps
+
+
+def game_faithful_filter(channels, loc_eps=0.01):
+    """Reshape imported channels to match how the SHIPPED game authors the root region, so an
+    imported clip behaves in-game like a real one:
+
+      * Balance_Root  -> dropped entirely (no clip ever animates it).
+      * Motion_Root   -> keep translation; constrain rotation to a pure vertical YAW (facing turns
+                         stay grounded; a stray pitch/roll that would tip the whole character over
+                         and lift the feet is removed).
+      * STATIC translation (any bone) -> dropped. A skeletal animation is almost all rotation; the
+                         game translates only a handful of bones (root + real stretch). Blender,
+                         though, writes a position channel on EVERY bone — the static bone offset —
+                         and feeding that back in as a translation OVERRIDES the skeleton's bone
+                         lengths and squashes the character (a 'scale' bug). We keep a translation
+                         channel only if it genuinely moves; a still one is redundant with the rest
+                         skeleton, so we drop it and the bone keeps its correct length.
+      * everything else (Character_Root lean, Pelvis/Spine flips, body, hands, grapple anchors) ->
+                         kept exactly as authored.
+
+    Returns a new channels dict. (This is safe for our own round-trips: an unmoving loc equals the
+    rest offset, so dropping it changes nothing; only Blender's mismatched offsets get corrected.)"""
+    out = {}
+    for b, slots in channels.items():
+        if b == ROOT_BALANCE:
+            continue
+        s = dict(slots)
+        if b == ROOT_MOTION and "rot" in s:
+            fr, qs = s["rot"]
+            s["rot"] = (fr, [_yaw_only(q) for q in qs])
+        if "loc" in s and not _loc_moves(s["loc"][1], loc_eps):
+            del s["loc"]
+        if s:
+            out[b] = s
+    return out
+
+
 # ------------------------------------------------------------------ conversions
 def _iter_channels(bvh):
     """Yield (joint_index, {channel_name: column_index}) using the row layout of MOTION."""

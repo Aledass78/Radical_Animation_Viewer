@@ -79,15 +79,30 @@ The **Bones** list tags each bone with the channels it animates in the current c
 **📥 Import BVH** (button, or **File ▸ Import / Write**) reads a `.bvh` (from Blender, Maya, our
 own **Export BVH**, …) and offers three actions:
 
-- **View it** — loads the BVH as a skeleton + clip and plays it in the viewer, no `.p3d` needed.
-- **Add as a NEW clip** to the loaded `.p3d` — you name it and pick a **"structure like"** existing
-  clip; the new clip copies that clip's channel set (so it drops the root chain and stays
-  grounded/correct-sized, instead of writing the full BVH skeleton).
+- **View it** — loads the BVH as a skeleton + clip and plays it in the viewer, no `.p3d` needed
+  (shows the raw BVH, before the game-faithful policy).
+- **Add as a NEW clip** to the loaded `.p3d` — you name it.
 - **REPLACE an existing clip** (pick it from the list); the new clip keeps the replaced clip's
   **name** so it occupies the same animation slot.
 
 Add/Replace apply to the **in-memory document** (see below) — undoable, and written only when you
 **Save**.
+
+**Game-faithful import policy.** On Add/Replace the tool reshapes the clip to match how the shipped
+game authors the root region (verified across `alex`/`alex_boss`/`evolved`), so an imported clip
+behaves in-game like a real one:
+
+- **Body bones** (Pelvis, Spine, limbs, head, hands, grapple anchors) — kept **exactly as authored**,
+  so a flip/roll on `Pelvis`+`Spine` survives intact.
+- **`Motion_Root`** — keeps translation and **facing**, but its rotation is constrained to a **pure
+  vertical yaw** (how the game turns a character; height-preserving, so the feet stay grounded). A
+  stray pitch/roll on the root — e.g. from rotating the whole rig in Blender — is removed so the
+  character can't tip over / lift off the floor.
+- **`Balance_Root`** — dropped (no shipped clip ever animates it).
+
+This replaced the old "structure like a template clip" filter. Validated by round-tripping shipped
+clips through export→import: a 180° **turn** keeps its grounded yaw and a parkour **back-flip** keeps
+its full jump arc, both frame-for-frame identical to the originals (feet + facing).
 
 The reader (`p3d_bvh.py`) respects each joint's declared `CHANNELS` order and converts Euler →
 quaternion; a BVH exported by this tool round-trips to the original pose (~3×10⁻⁶). Add/Replace are
