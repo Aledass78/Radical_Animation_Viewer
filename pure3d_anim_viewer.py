@@ -120,7 +120,7 @@ class _BvhImportDialog(tk.Toplevel):
         for lab, var in (("X", self.rx_var), ("Y", self.ry_var), ("Z", self.rz_var)):
             ttk.Label(rotf, text=lab).pack(side="left", padx=(8, 1))
             ttk.Entry(rotf, textvariable=var, width=5).pack(side="left")
-        ttk.Label(frm, text="0 = as-is (game clips need none). A Z-up (Blender) source needs X = -90 "
+        ttk.Label(frm, text="0 = as-is (our own exports). A Z-up (Blender) source needs X = -90 "
                             "(fixes orientation AND the per-bone twist).",
                   foreground=TEXT).pack(anchor="w", pady=(3, 0))
 
@@ -411,12 +411,16 @@ class Viewer(tk.Tk):
             filetypes=[("Biovision Hierarchy", "*.bvh")])
         if not path:
             return
+        # Park attachment/helper bones at rest when they're hidden in the viewer, so they stay glued
+        # to the hand (editable for holding) instead of spiking to their off-body anchor in Blender.
+        rest = self._helper if self.hide_helpers.get() else frozenset()
         try:
-            n = pexport.export_bvh(self.model, self.clip_idx, path, fps=self.fps)
+            n = pexport.export_bvh(self.model, self.clip_idx, path, fps=self.fps, rest_bones=rest)
         except Exception as e:
             messagebox.showerror("Export failed", str(e))
             return
-        self.status.config(text="Exported %d frames → %s" % (n, os.path.basename(path)))
+        note = " (helper bones parked at rest)" if rest else " (all bones incl. anchors)"
+        self.status.config(text="Exported %d frames → %s%s" % (n, os.path.basename(path), note))
 
     def export_json(self):
         if not self.model:
@@ -443,11 +447,12 @@ class Viewer(tk.Tk):
         folder = filedialog.askdirectory(title="Choose a folder for one .bvh per clip")
         if not folder:
             return
+        rest = self._helper if self.hide_helpers.get() else frozenset()
         n = 0
         for ci in range(len(self.model.clips)):
             fn = os.path.join(folder, self._safe_name(self.model.clips[ci].name) + ".bvh")
             try:
-                pexport.export_bvh(self.model, ci, fn, fps=self.fps)
+                pexport.export_bvh(self.model, ci, fn, fps=self.fps, rest_bones=rest)
                 n += 1
             except Exception:
                 pass
@@ -552,8 +557,11 @@ class Viewer(tk.Tk):
             #     the user asks for a raw import (writes every channel exactly as authored).
             if not dlg.result.get("raw"):
                 channels = pbvh.game_faithful_filter(channels)
+            # On REPLACE, carry through channel types we don't synthesise (e.g. Motion_Root's
+            # 0x121101 'LCPH' aux) from the clip being replaced, so they aren't lost.
+            aux = self.doc.aux_channels(clip_name) if action == "replace" else None
             clip = pwrite.build_clip(clip_name, self.model.joints, channels, nframes,
-                                     fps=fps, be=self.be)
+                                     fps=fps, be=self.be, aux=aux)
         except Exception as e:
             messagebox.showerror("Import BVH failed", str(e))
             return
@@ -787,6 +795,8 @@ class Viewer(tk.Tk):
             tag = ""
             if slots:
                 tag = " [" + "".join(s[0] for s in ("rot", "loc", "scl") if s in slots).upper() + "]"
+                if "lcph" in slots:
+                    tag += " +LCPH"
             if i in self._helper:
                 tag += " ·helper"
             self.bone_list.insert("end", j.name + tag)
@@ -1014,6 +1024,10 @@ class Viewer(tk.Tk):
         tag = "+".join(sorted(slots)).upper() if slots else "rest"
         self.canvas.create_text(10, 14, anchor="w", fill=TEXT, font=("Consolas", 10),
                                  text="%s   [%s]" % (j.name, tag))
+        lc = self.model.lcph_at(self.clip_idx, self.sel, self.frame)
+        if lc is not None:
+            self.canvas.create_text(10, 30, anchor="w", fill=ACCENT, font=("Consolas", 10),
+                                     text="LCPH (Motion_Root aux): (% .3f, % .3f)" % lc)
 
     def _about(self):
         messagebox.showinfo(

@@ -56,23 +56,61 @@ def _children_map(model):
     return kids, roots
 
 
-def export_bvh(model, clip_idx, path, fps=30):
-    """Write clip `clip_idx` of `model` to a BVH file at `path`."""
+# Rx(+90): game Y-up -> Blender Z-up, as a CHANGE OF BASIS applied to every bone (this is exactly
+# what Blender does to a BVH — offsets/translations rotate by Rx(+90), local rotations conjugate by
+# it — so our export matches Blender's convention and round-trips through the importer's X=-90 fix).
+_R90 = (1.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0)     # Rx(+90) row-major flat9
+_R90i = (1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0)    # Rx(-90) = its inverse/transpose
+
+
+def _m3v(M, v):
+    return (M[0] * v[0] + M[1] * v[1] + M[2] * v[2],
+            M[3] * v[0] + M[4] * v[1] + M[5] * v[2],
+            M[6] * v[0] + M[7] * v[1] + M[8] * v[2])
+
+
+def _m3m(A, B):
+    return [sum(A[r * 3 + k] * B[k * 3 + c] for k in range(3)) for r in range(3) for c in range(3)]
+
+
+def export_bvh(model, clip_idx, path, fps=30, rest_bones=frozenset(), zup=False):
+    """Write clip `clip_idx` of `model` to a BVH file at `path`.
+
+    rest_bones -- joint indices to write at their REST pose (ignore their animation). Use this for
+    non-deforming attachment locators (`*_Grapple`, `*_Con`): the game parks them at an off-body
+    anchor (a held/thrown object's spot), which drags a lone bone far from the character — often
+    below the floor — in Blender. Resting them keeps the bone present (glued to its parent, e.g. the
+    wrist) so you can still animate holding on it, without the stray spike.
+    zup -- write in Blender's **Z-up** convention (default). BVH carries no up-axis, and Blender
+    reads it Z-up; the game is Y-up, so a raw export imports **upside-down** in Blender. Rotating the
+    root by Rx(+90) makes it import upright/grounded (matching how an .fbx comes in). Set False to
+    keep the game's native Y-up."""
     joints = model.joints
     clip = model.clips[clip_idx]
     kids, roots = _children_map(model)
     root = roots[0] if roots else 0
-    # a joint gets position channels if it's the root or carries a translation channel
+    # a joint gets position channels if it's the root or carries a translation channel (rested
+    # bones keep theirs too, but the value is constant = their offset, i.e. a zero position channel)
     has_pos = [(i == root) or ('loc' in model.channels_for(clip_idx, i)) for i in range(len(joints))]
 
     order = []                                # DFS pre-order (== MOTION value order)
     lines = ["HIERARCHY"]
 
+    def _offset(i):
+        if i == root:
+            # The root carries its full world height in the POSITION channel, with a zero OFFSET.
+            # Otherwise the ~1-unit root height is baked into the bone offset, and importers that
+            # place the root by its position channel alone (ignoring the offset) drop the whole
+            # character ~1 unit — legs end up below the floor in Blender.
+            return (0.0, 0.0, 0.0)
+        o = model.rest_offset(i)
+        return _m3v(_R90, o) if zup else o
+
     def emit(i, depth, is_root):
         order.append(i)
         pad = "\t" * depth
         kw = "ROOT" if is_root else "JOINT"
-        ox, oy, oz = model.rest_offset(i)
+        ox, oy, oz = _offset(i)
         lines.append(f"{pad}{kw} {joints[i].name}")
         lines.append(f"{pad}{{")
         lines.append(f"{pad}\tOFFSET {ox:.6f} {oy:.6f} {oz:.6f}")
@@ -84,9 +122,10 @@ def export_bvh(model, clip_idx, path, fps=30):
             emit(c, depth + 1, False)
         if not kids[i]:                       # leaf -> End Site (small tip so the bone is visible)
             tip = 0.03 * model.span
+            tx, ty, tz = _m3v(_R90, (0.0, tip, 0.0)) if zup else (0.0, tip, 0.0)
             lines.append(f"{pad}\tEnd Site")
             lines.append(f"{pad}\t{{")
-            lines.append(f"{pad}\t\tOFFSET 0.000000 {tip:.6f} 0.000000")
+            lines.append(f"{pad}\t\tOFFSET {tx:.6f} {ty:.6f} {tz:.6f}")
             lines.append(f"{pad}\t}}")
         lines.append(f"{pad}}}")
 
@@ -100,9 +139,15 @@ def export_bvh(model, clip_idx, path, fps=30):
     for f in range(nframes):
         vals = []
         for i in order:
-            R, t = model.local_rot_trans(clip_idx, i, float(f))
+            if i in rest_bones:
+                R, t = model.rest_rot_trans(i)               # park at rest (ignore its animation)
+            else:
+                R, t = model.local_rot_trans(clip_idx, i, float(f))
+            if zup:                                          # Y-up -> Z-up change of basis (every bone)
+                R = _m3m(_m3m(_R90, R), _R90i)               # conjugate the local rotation
+                t = _m3v(_R90, t)
             if has_pos[i]:
-                ox, oy, oz = model.rest_offset(i)
+                ox, oy, oz = _offset(i)
                 vals += [t[0] - ox, t[1] - oy, t[2] - oz]      # position = animated - rest offset
             z, y, x = _mat_to_euler_zyx(R)
             vals += [z * _R2D, y * _R2D, x * _R2D]

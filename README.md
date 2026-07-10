@@ -64,11 +64,22 @@ The **Bones** list tags each bone with the channels it animates in the current c
 - **BVH** (`.bvh`) — **Blender-compatible** (and Maya / MotionBuilder / Unity / …). Import in
   Blender with **File ▸ Import ▸ Motion Capture (.bvh)** — no addon needed. Rotation + root/bone
   translation are baked to Euler; scale (rare, helper-bones only) is dropped. Coordinates are the
-  game's native Y-up, so leave Blender's **Y Up** import option on. The writer is verified by a
-  round-trip (re-parse + FK) to ~3×10⁻⁶ against the viewer's own pose.
+  game's native **Y-up** (leave Blender's **Y Up** import option on). The **root's height is written
+  into its position channel** (with a zero root offset), so the character stays grounded even in
+  importers that place the root by its position alone. The writer is verified by a round-trip
+  (re-parse + FK) to ~3×10⁻⁶ against the viewer's own pose. (A `zup=True` flag exists for a Z-up
+  export, but Y-up is the default.)
 - **JSON** (`.json`) — a lossless dump of the decoded skeleton + channels (rotation quaternions,
   translation, scale) for custom pipelines.
 - **ALL clips → BVH folder** — batch-writes one `.bvh` per clip.
+
+**Attachment bones on export.** The non-deforming anchor bones (`*_Grapple`, `*_Con`) get parked by
+the game at an off-body point (where a held/thrown object goes) — often far from the character or
+below the floor. BVH exports every bone, so in Blender those lone bones spike below ground even
+though the **body is grounded**. So the exporter writes them at their **rest pose** (glued to their
+parent, e.g. the wrist) whenever **Hide helper bones** is ticked (the default) — the bone is still
+present, so you can animate holding on it, it just doesn't fly to the anchor. Untick **Hide helper
+bones** to export their full original anchor animation instead.
 
 > For the highest-fidelity Blender path (quaternions, no Euler baking, plus scale), use the
 > bundled Blender addon instead: `P3DAddon` → *File ▸ Import ▸ Pure 3D Animation (.p3d)*, which

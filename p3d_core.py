@@ -40,7 +40,12 @@ _CH = {
     0x00121118: ('vec', 26, 22, 4, 2, 'h2'),
     0x00121103: ('vec', 26, 22, 8, 2, 'f2'),
     0x00121102: ('vec', 26, 22, 4, 1, 'f1'),
+    # LCPH: a Motion_Root-only auxiliary 2-scalar channel (combat/finisher clips; a look/align
+    # steer, NOT a pose). Same inline layout [u32 0][4CC][u32 count][u16 frames][2x f32].
+    0x00121101: ('lcph', 12, 8, 8, 2, 'f2'),
 }
+
+LCPH_ID = 0x00121101
 
 
 # ===========================================================================
@@ -241,11 +246,13 @@ def _vec3(vals, dof, mapping, base):
 def _slot(role_kind, ttype):
     if role_kind == 'rot':
         return 'rot'
+    if role_kind == 'lcph':
+        return 'lcph'
     t = ttype.rstrip('\x00')
     return {'TRAN': 'loc', 'SCL': 'scl'}.get(t)
 
 
-def decode_clip_channels(anim, want=('rot', 'loc', 'scl')):
+def decode_clip_channels(anim, want=('rot', 'loc', 'scl', 'lcph')):
     """0x121000 -> {bone: {slot:(frames, values)}} (rot=(x,y,z,w), loc/scl=(x,y,z))."""
     size = anim.find(BONELIST)
     if size is None:
@@ -298,7 +305,12 @@ def decode_clip_channels(anim, want=('rot', 'loc', 'scl')):
                 continue
             if not fr:
                 continue
-            vals = [_quat(r, dec) for r in raw] if slot == 'rot' else [_vec3(r, dof, mapping, base) for r in raw]
+            if slot == 'rot':
+                vals = [_quat(r, dec) for r in raw]
+            elif slot == 'lcph':
+                vals = [(float(r[0]), float(r[1])) for r in raw]   # two raw scalars, no axis mapping
+            else:
+                vals = [_vec3(r, dof, mapping, base) for r in raw]
             slots[slot] = (fr, vals)
         if slots:
             out[bone] = slots
@@ -474,11 +486,30 @@ class Model:
             return set()
         return set(self.clips[clip_idx].channels.get(self.joints[joint_idx].name, {}).keys())
 
+    def lcph_at(self, clip_idx, joint_idx, frame):
+        """The (v0, v1) LCPH auxiliary values for a joint at `frame`, or None if it has no LCPH."""
+        if not (0 <= clip_idx < len(self.clips)) or not (0 <= joint_idx < len(self.joints)):
+            return None
+        slots = self.clips[clip_idx].channels.get(self.joints[joint_idx].name, {})
+        lc = slots.get('lcph')
+        if not lc:
+            return None
+        fr, vals = lc
+        v = _sample_vec(fr, [(a, b, 0.0) for a, b in vals], frame)
+        return (v[0], v[1])
+
     # ---- exporter accessors (per-joint LOCAL transform, no scale) ----
     def rest_offset(self, i):
         """Parent-local rest translation of joint i (the BVH OFFSET)."""
         L = self._local_col[i]
         return (L[3], L[7], L[11])
+
+    def rest_rot_trans(self, i):
+        """Parent-local REST rotation (flat9, column-vector) + translation of joint i — the pose it
+        holds with no animation applied. Used to 'park' a bone (e.g. an attachment locator) at its
+        rest so it tracks its parent instead of flying to an off-body anchor point."""
+        m = self._local_col[i]
+        return [m[0], m[1], m[2], m[4], m[5], m[6], m[8], m[9], m[10]], (m[3], m[7], m[11])
 
     def local_rot_trans(self, clip_idx, i, frame):
         """Animated LOCAL rotation matrix (flat9, column-vector) + translation for joint i,

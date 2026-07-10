@@ -220,20 +220,26 @@ def _quat_to_q6(q):
     return (int(round(x * 32767)), int(round(y * 32767)), int(round(z * 32767)))
 
 
-def build_clip(name, joints, channels, num_frames, fps=30, cyclic=0, be=False):
+def build_clip(name, joints, channels, num_frames, fps=30, cyclic=0, be=False, aux=None):
     """Build a full 0x121000 Animation subtree (bytes) from decoded channels.
 
     joints    -- list with .name (bone order for the AnimationBone list; only animated bones are written)
     channels  -- {bone_name: {'rot': (frames, quats[xyzw]), 'loc': (frames, xyz), 'scl': (frames, xyz)}}
                  rot -> Quaternion6 (0x121112); loc/scl -> Vector3DOF f32 (0x121104).
+    aux       -- optional {bone_name: [raw_channel_chunk_bytes, ...]} of already-serialised channel
+                 chunks to carry through verbatim (e.g. Motion_Root's 0x121101 'LCPH' aux channel,
+                 which we don't synthesise but must preserve on a replace). Each is appended to that
+                 bone's channel list and registered in the inline header.
     """
+    aux = aux or {}
     order = [(j if isinstance(j, str) else j.name) for j in joints] if joints else list(channels)
-    animated = [b for b in order if b in channels] + [b for b in channels if b not in set(order)]
+    allbones = list(channels) + [b for b in aux if b not in channels]
+    animated = [b for b in order if b in allbones] + [b for b in allbones if b not in set(order)]
 
     bone_chunks = []
     type_keys = {}                                      # chunkID -> [per-channel keyCount, ...]
     for bone in animated:
-        slots = channels[bone]
+        slots = channels.get(bone, {})
         chan = []
         if "rot" in slots:
             frames, quats = slots["rot"]
@@ -248,6 +254,12 @@ def build_clip(name, joints, channels, num_frames, fps=30, cyclic=0, be=False):
             frames, xyz = slots["scl"]
             chan.append(_encode_value_channel(0x00121104, "SCL\0", frames, xyz, be))
             type_keys.setdefault(0x00121104, []).append(len(frames))
+        for raw in aux.get(bone, ()):                   # verbatim aux channels (e.g. LCPH)
+            raw = bytes(raw)
+            cid = struct.unpack_from(">I" if be else "<I", raw, 0)[0]
+            keycount = struct.unpack_from(">I" if be else "<I", raw, 12 + 8)[0]   # count @ payload+8
+            chan.append(raw)
+            type_keys.setdefault(cid, []).append(keycount)
         if not chan:
             continue
         payload = _u32(0, be) + aligned_str(bone) + _u32(0, be) + _u32(len(chan), be)
@@ -428,6 +440,29 @@ class Document:
                 nm = self._name_of(cb)
                 if nm is not None:
                     out.append(nm)
+        return out
+
+    def aux_channels(self, name, ids=(0x00121101,)):
+        """{bone: [raw channel-chunk bytes]} for channel types we don't synthesise (e.g. the
+        Motion_Root 0x121101 'LCPH' aux channel), so a replace can carry them through verbatim."""
+        i = self._find(name)
+        if i < 0:
+            return {}
+        anim = core._parse(self.children[i], 0, self.be)
+        bl = anim.find(BONELIST)
+        out = {}
+        if bl is None:
+            return out
+        for kv in bl.children:
+            if kv.chunk_id != BONE:
+                continue
+            try:
+                bone = kv.p3d_string(4)[0]
+            except Exception:
+                continue
+            raws = [_copy(x, self.be) for x in kv.children if x.chunk_id in ids]
+            if raws:
+                out[bone] = raws
         return out
 
     def add_clip(self, clip_bytes):
