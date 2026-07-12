@@ -48,6 +48,7 @@ python pure3d_anim_viewer.py path/to/file.p3d
 | Undo / redo an edit | **↶ Undo** (Ctrl+Z) / **↷ Redo** (Ctrl+Y) |
 | Export the current clip | **📤 Export BVH** button, or **File ▸ Export** |
 | Import a BVH | **📥 Import BVH** button, or **File ▸ Import / Write** |
+| Import a FBX | **File ▸ Import / Write ▸ Import FBX** (ASCII or binary) |
 | Delete the selected clip | **🗑 Delete clip** button, or **File ▸ Import / Write** |
 | Hide helper bones | checkbox, top-right (on by default) |
 
@@ -69,9 +70,46 @@ The **Bones** list tags each bone with the channels it animates in the current c
   importers that place the root by its position alone. The writer is verified by a round-trip
   (re-parse + FK) to ~3×10⁻⁶ against the viewer's own pose. (A `zup=True` flag exists for a Z-up
   export, but Y-up is the default.)
+- **FBX** (`.fbx`, ASCII) — the **best all-round** option: it stores per-bone **length** (so Blender
+  draws proper **octahedral bones**, not glTF's sphere blobs) *and* the **rest pose** (rotations,
+  unlike BVH) *and* per-frame rotation/translation/**scale**. Import in Blender with **File ▸ Import
+  ▸ FBX** (for the BVH-style connected look, tick *Armature ▸ Automatic Bone Orientation*). Verified
+  export→re-read→inject round-trip is exact (0.00000 at every frame).
+- **glTF** (`.glb`) — a standard binary glTF with the **full skeleton (correct rest pose, rotations
+  included)**, a skin, and the animation as rotation/translation/**scale** samplers. Unlike BVH it
+  keeps rest rotations and scale, and imports into Blender/Unity/three.js as a proper armature.
+  Verified geometrically exact against the viewer's pose (0.000000 at every frame). Note: glTF has no
+  bone-length concept, so bones import as small octahedra ("sphere" cluster) — set the armature
+  **Display As ▸ Stick**, or use **FBX** for proper bones.
 - **JSON** (`.json`) — a lossless dump of the decoded skeleton + channels (rotation quaternions,
-  translation, scale) for custom pipelines.
+  translation, scale, **and each bone's full rest matrix**) for custom pipelines and the Blender
+  add-on below.
 - **ALL clips → BVH folder** — batch-writes one `.bvh` per clip.
+
+### Blender add-on — correct rest pose (`__Addon_For_Blender.py`)
+
+BVH can't store a bone's rest rotation, so a BVH bind pose always looks scrambled. For a **correct
+rest pose**, use the bundled add-on: **Edit ▸ Preferences ▸ Add-ons ▸ Install…** → pick
+`__Addon_For_Blender.py` → enable it. Then:
+
+- **File ▸ Import ▸ Pure3D Animation (.p3d)** — builds the armature from the file's real rest
+  matrices and imports every clip (rotation + translation + scale) as Actions.
+- **File ▸ Import ▸ Pure3D JSON (.json)** — same, from a JSON exported here.
+- **File ▸ Export ▸ Pure3D Animation (.p3d)** — writes the selected armature(s) + their Actions back
+  to a `.p3d` (skeleton + inline animation clips).
+
+Both rebuild the skeleton with the game's actual rest orientation, so the bind pose matches the game
+(no BVH offset-only stick skeleton). Self-contained pure Python — no DLLs.
+
+**Multi-skeleton files.** A `.p3d` can hold several skeletons (character + prop) and hundreds of
+clips; the importer builds **one armature per skeleton** and routes each clip to the skeleton whose
+bones it drives (best coverage). Camera-only clips (no skeletal bones) are skipped.
+
+**Export note.** The exported clips are byte-exact (same writer as the desktop tool). The **skeleton**
+it writes is readable by these tools (correct rest matrices, verified round-trip) but does **not**
+reproduce the game's extra per-joint data / bone-group / IK sub-chunks — so it's meant for the
+Blender → edit → `.p3d` → **inject into a game character file** workflow (via the desktop tool's
+Replace), not as a drop-in replacement game skeleton. Untested in-game.
 
 **Attachment bones on export.** The non-deforming anchor bones (`*_Grapple`, `*_Con`) get parked by
 the game at an off-body point (where a held/thrown object goes) — often far from the character or

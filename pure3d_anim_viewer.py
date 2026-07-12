@@ -33,6 +33,7 @@ import p3d_core as core
 import p3d_export as pexport
 import p3d_write as pwrite
 import p3d_bvh as pbvh
+import p3d_fbx as pfbx
 
 
 # --- colours (dark theme) ---
@@ -223,11 +224,16 @@ class Viewer(tk.Tk):
         fm.add_separator()
         ex = tk.Menu(fm, tearoff=0)
         ex.add_command(label="Current clip → BVH (Blender / mocap)…", command=self.export_bvh)
+        ex.add_command(label="Current clip → FBX — as in-game as possible…", command=self.export_fbx)
+        ex.add_command(label="Current clip → FBX — as compatible as possible (Mixamo-style)…",
+                       command=lambda: self.export_fbx(compat=True))
+        ex.add_command(label="Current clip → glTF .glb (rest pose + scale)…", command=self.export_gltf)
         ex.add_command(label="Current clip → JSON (decoded curves)…", command=self.export_json)
         ex.add_command(label="ALL clips → BVH folder…", command=self.export_all_bvh)
         fm.add_cascade(label="Export", menu=ex)
         im = tk.Menu(fm, tearoff=0)
         im.add_command(label="Import BVH… (view / add / replace)", command=self.import_bvh)
+        im.add_command(label="Import FBX… (view / add / replace)", command=self.import_fbx)
         im.add_command(label="JSON clip → inject into loaded .p3d…", command=self.import_json_clip)
         im.add_command(label="Delete selected clip…", command=self.delete_selected_clip)
         im.add_command(label="Re-save loaded .p3d (clips inline)…", command=self.resave_inline)
@@ -422,6 +428,48 @@ class Viewer(tk.Tk):
         note = " (helper bones parked at rest)" if rest else " (all bones incl. anchors)"
         self.status.config(text="Exported %d frames → %s%s" % (n, os.path.basename(path), note))
 
+    def export_fbx(self, compat=False):
+        if not self.model:
+            messagebox.showinfo("Export", "Open a .p3d file first.")
+            return
+        clip = self.model.clips[self.clip_idx]
+        title = ("Export FBX — as compatible as possible (Mixamo-style, connected bones)" if compat
+                 else "Export FBX — as in-game as possible (game rest frames)")
+        suffix = "_compat" if compat else ""
+        path = filedialog.asksaveasfilename(
+            title=title, defaultextension=".fbx",
+            initialfile=self._safe_name(clip.name) + suffix + ".fbx",
+            filetypes=[("FBX", "*.fbx")])
+        if not path:
+            return
+        try:
+            n = pfbx.export_fbx(self.model, self.clip_idx, path, fps=self.fps, compat=compat)
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+            return
+        kind = "compatible — Mixamo-style +Y bones via PreRotation" if compat else "as in-game"
+        self.status.config(text="Exported %d frames → %s (FBX: %s)"
+                           % (n, os.path.basename(path), kind))
+
+    def export_gltf(self):
+        if not self.model:
+            messagebox.showinfo("Export", "Open a .p3d file first.")
+            return
+        clip = self.model.clips[self.clip_idx]
+        path = filedialog.asksaveasfilename(
+            title="Export clip to glTF (.glb) — correct rest pose + scale",
+            defaultextension=".glb", initialfile=self._safe_name(clip.name) + ".glb",
+            filetypes=[("glTF binary", "*.glb")])
+        if not path:
+            return
+        try:
+            n = pexport.export_gltf(self.model, self.clip_idx, path, fps=self.fps)
+        except Exception as e:
+            messagebox.showerror("Export failed", str(e))
+            return
+        self.status.config(text="Exported %d frames → %s (glTF: rest pose + scale)"
+                           % (n, os.path.basename(path)))
+
     def export_json(self):
         if not self.model:
             messagebox.showinfo("Export", "Open a .p3d file first.")
@@ -595,6 +643,84 @@ class Viewer(tk.Tk):
         self.src_lbl.config(text="%s · BVH · %d clips · %d joints · %d fps"
                             % (label, len(model.clips), len(model.joints), fps))
         self.status.config(text="Loaded BVH: " + label)
+
+    # ---------------------------------------------------------- import FBX
+    @staticmethod
+    def _fbx_joints_to_core(r):
+        """FBX read joints (name,parent,quat,pos) -> [core.Joint] with row-major rest local."""
+        js = []
+        for jn, par, q, t in r["joints"]:
+            R = pfbx._quat_to_mat(q)                    # column-vector 3x3 flat9
+            local = [R[0], R[3], R[6], 0.0,             # row-major, translation at [12:15]
+                     R[1], R[4], R[7], 0.0,
+                     R[2], R[5], R[8], 0.0,
+                     t[0], t[1], t[2], 1.0]
+            js.append(core.Joint(jn, par, local))
+        core._fill_bind(js)
+        return js
+
+    def import_fbx(self):
+        path = filedialog.askopenfilename(title="Import FBX animation (ASCII or binary)",
+                                          filetypes=[("FBX", "*.fbx"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            r = pfbx.read_fbx(path)
+        except Exception as e:
+            messagebox.showerror("Import FBX failed", "Could not read %s:\n%s" % (os.path.basename(path), e))
+            return
+        channels = r["channels"]
+        if not channels:
+            messagebox.showwarning("Import FBX", "No animation found in the FBX.")
+            return
+        fps = r.get("fps", 30) or 30
+        nframes = 1 + max((fr[-1] for s in channels.values() for (fr, _v) in s.values() if fr), default=0)
+
+        has_target = bool(self.doc)
+        clips = [c.name for c in self.model.clips] if self.model else []
+        default_name = self._safe_name(os.path.splitext(os.path.basename(path))[0])
+        dlg = _BvhImportDialog(self, has_target, clips, default_name,
+                               self._src_name() if has_target else None)
+        self.wait_window(dlg)
+        if not dlg.result:
+            return
+        action = dlg.result["action"]
+        rot = dlg.result.get("rot", (0.0, 0.0, 0.0))
+
+        if action == "view":
+            js = self._fbx_joints_to_core(r)
+            ch = dict(channels)
+            if any(rot):
+                pbvh.apply_rotation(ch, js, rot[0], rot[1], rot[2])
+            model = core.Model(os.path.basename(path), js, os.path.basename(path),
+                               [core.Clip(default_name, ch)])
+            self.fps = fps
+            self.fps_var.set(fps)
+            self._show_bvh_model(model, os.path.basename(path), fps)
+            return
+
+        clip_name = dlg.result["target"] if action == "replace" else dlg.result.get("name", default_name)
+        try:
+            ch = {b: dict(s) for b, s in channels.items()}
+            if any(rot):                                # coordinate fix (Blender Z-up -> game, X=-90)
+                pbvh.apply_rotation(ch, self.model.joints, rot[0], rot[1], rot[2])
+            if not dlg.result.get("raw"):
+                ch = pbvh.game_faithful_filter(ch)
+            aux = self.doc.aux_channels(clip_name) if action == "replace" else None
+            clip = pwrite.build_clip(clip_name, self.model.joints, ch, nframes,
+                                     fps=fps, be=self.be, aux=aux)
+        except Exception as e:
+            messagebox.showerror("Import FBX failed", str(e))
+            return
+        mode_txt = "raw" if dlg.result.get("raw") else "game-faithful"
+        if action == "add":
+            ok = self._commit(lambda: self.doc.add_clip(clip), select_name=clip_name)
+            note = "Added clip '%s' from FBX (%s)." % (clip_name, mode_txt)
+        else:
+            ok = self._commit(lambda: self.doc.replace_clip(clip_name, clip), select_name=clip_name)
+            note = "Replaced clip '%s' from FBX (%s)." % (clip_name, mode_txt)
+        if ok:
+            self.status.config(text=note + " Unsaved — use Save / Save As.")
 
     def load(self, path):
         """Open a .p3d fully into memory (an editable Document). No further disk dependency."""

@@ -530,6 +530,20 @@ class Model:
             t = (L[3], L[7], L[11])
         return R, t
 
+    def local_matrix(self, clip_idx, i, frame):
+        """Animated LOCAL transform of joint i at `frame` as a flat16 column-vector 4x4, WITH scale
+        applied (same transform pose_world composes). Used by the FBX 'compat' retarget so its FK
+        heads match the game exactly even for scaled bones."""
+        slots = self.clips[clip_idx].channels.get(self.joints[i].name, {}) \
+            if 0 <= clip_idx < len(self.clips) else {}
+        if slots:
+            return self._anim_local(i, slots, frame)
+        return self._local_col[i][:]
+
+    def rest_matrix(self, i):
+        """Parent-local REST transform of joint i as a flat16 column-vector 4x4 (with rest scale)."""
+        return self._local_col[i][:]
+
 
 def load_p3d(path):
     """Load a .p3d from disk. See load_bytes for the return shape."""
