@@ -341,11 +341,7 @@ def export_fbx(model, clip_idx, path, fps=30, compat=False):
                 hd[i] = (Wm[i][3], Wm[i][7], Wm[i][11])
             return wq, hd
 
-        def _aim_of(gq, hd):
-            return [_aim_world(gq[i], hd[i], hd[kids[i][0]] if kids[i] else None, up_axis[i])
-                    for i in range(n)]
-
-        # FK rest + every frame up front (need per-frame heads to tell rigid limbs from moving connectors)
+        # FK rest + every frame up front
         gqr, hdr = _fk_world(lambda i: model.rest_matrix(i))
         frames = list(range(nframes))
         gq_f, head_f = [], []
@@ -353,30 +349,63 @@ def export_fbx(model, clip_idx, path, fps=30, compat=False):
             gq, hd = _fk_world(lambda i, ff=f: model.local_matrix(clip_idx, i, ff))
             gq_f.append(gq); head_f.append(hd)
 
-        # A bone aims its +Y at its first child only when it has EXACTLY ONE child that is RIGIDLY
-        # attached (constant distance across the clip). Cases that keep their stable game orientation
-        # (up_axis = -1) instead:
-        #  * multi-child bones (Pelvis, Character_Root, spine/clavicle junctions): a bone can't point at
-        #    all its children, so aiming at an arbitrary first child tilts it (e.g. Pelvis -> Hip_L). They
-        #    can't connect to every child in Blender anyway, so keep them upright like the game/BVH.
-        #  * root/pelvis connectors whose child translates relative to them (e.g. Balance_Root ->
-        #    Character_Root): the aim sweeps and any fixed roll reference eventually aligns with it and
-        #    pops ~90 deg.
-        # Positions stay exact either way (a bone's own roll never affects joint positions). Single-child
-        # rigid limbs get a fixed rest-chosen roll axis whose alignment with the aim is constant.
-        up_axis = [-1] * n
-        for i in range(n):
-            if len(kids[i]) != 1:
-                continue
-            c = kids[i][0]
-            dists = [math.dist(head_f[fi][i], head_f[fi][c]) for fi in range(len(frames))]
-            dmax = max(dists) if dists else 0.0
-            rigid = dmax > 1e-6 and (dmax - min(dists)) <= max(0.005, 0.02 * dmax)
-            up_axis[i] = _aim_up_axis(gqr[i], hdr[i], hdr[c]) if rigid else -1
+        # Give each bone the SAME rest orientation Blender builds from our .bvh, so the compat rig LOOKS
+        # like the BVH (bones running down the limbs) — but with FBX's scale + upright rest. Blender aims
+        # a BVH bone's tail at its single child, or at the AVERAGE of its children (multi-child), with
+        # attachment stubs (Shield / *_Grapple / *_Con / Collar ...) collapsed onto the primary child,
+        # exactly as our BVH export does. The animation then just rotates that rest frame:
+        #     aim_f[i] = G_i(f) * (G_i(rest)^-1 * N_bvh_i)
+        # which is stable (no per-frame look-at) and leaves joint positions exact (roll never moves a joint).
+        sz = [1] * n
+        for i in range(n - 1, -1, -1):
+            for c in kids[i]:
+                sz[i] += sz[c]
 
-        # bind: game rest -> aim world -> PreRotation + bind Lcl Translation
-        Nb = _aim_of(gqr, hdr)
-        aim_f = [_aim_of(gq_f[fi], head_f[fi]) for fi in range(len(frames))]
+        def _bvh_tail(i, heads):                          # avg of children heads, stubs -> primary child
+            ch = kids[i]
+            if not ch:
+                return None
+            prim = max(ch, key=lambda c: sz[c])
+            ax = ay = az = 0.0
+            for c in ch:
+                h = heads[prim] if (c != prim and sz[c] <= 2 and sz[prim] >= 3 * sz[c]) else heads[c]
+                ax += h[0]; ay += h[1]; az += h[2]
+            k = len(ch)
+            return (ax / k - heads[i][0], ay / k - heads[i][1], az / k - heads[i][2])
+
+        def _rigid(i):
+            # a bone can be BVH-aimed only if EVERY child stays FIXED relative to it (constant offset
+            # VECTOR, not just distance — a body-sway moves the child in a circle at ~constant distance).
+            # Aiming at a child that moves makes Blender +Y-CONNECT it, and a connected bone in Blender
+            # ignores its Lcl Translation animation — which for Character_Root (parent Balance_Root) is
+            # the whole body's fall/translation. Such connectors keep their game orientation so the child
+            # stays unconnected and its loc curve still plays.
+            if not kids[i]:
+                return False
+            for c in kids[i]:
+                xs = []; ys = []; zs = []
+                for fi in range(len(frames)):
+                    o = _qrotv(_qconj(gq_f[fi][i]),
+                               (head_f[fi][c][0] - head_f[fi][i][0], head_f[fi][c][1] - head_f[fi][i][1],
+                                head_f[fi][c][2] - head_f[fi][i][2]))
+                    xs.append(o[0]); ys.append(o[1]); zs.append(o[2])
+                if (max(xs) - min(xs) > 5e-3 or max(ys) - min(ys) > 5e-3 or max(zs) - min(zs) > 5e-3):
+                    return False
+            return True
+
+        Nb = [None] * n; C = [None] * n                   # N_bvh (rest orientation) + game->bvh reorient
+        for i in range(n):
+            d = _bvh_tail(i, hdr) if _rigid(i) else None
+            if d is None or (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) < 1e-10:
+                Nb[i] = gqr[i]                             # leaf / non-rigid connector -> keep game orientation
+            else:
+                a = _norm(d)
+                axes = (_qrotv(gqr[i], (1., 0., 0.)), _qrotv(gqr[i], (0., 1., 0.)), _qrotv(gqr[i], (0., 0., 1.)))
+                up = min(axes, key=lambda v: abs(v[0] * a[0] + v[1] * a[1] + v[2] * a[2]))
+                R3 = _lookat_y(a, up)
+                Nb[i] = _mat_to_quat([R3[0], R3[1], R3[2], R3[3], R3[4], R3[5], R3[6], R3[7], R3[8]])
+            C[i] = _qmul(_qconj(gqr[i]), Nb[i])
+        aim_f = [[_qmul(gq_f[fi][i], C[i]) for i in range(n)] for fi in range(len(frames))]
         Pq = [None] * n; prerot = [None] * n
         for i in range(n):
             p = joints[i].parent
@@ -389,9 +418,18 @@ def export_fbx(model, clip_idx, path, fps=30, compat=False):
                 rest_pos[i] = _qrotv(_qconj(Nb[p]), d)     # child head in parent aim frame (+Y-dominant)
             prerot[i] = _quat_to_euler_xyz_deg(Pq[i])
             rest_eul[i] = (0.0, 0.0, 0.0)                  # orientation lives in PreRotation
+        # Bone length = distance to the BVH tail (the average of children it now aims at), and leaf tips
+        # = 0.03*span, exactly like our BVH -> matching bone SIZES too. Sizing to the first child instead
+        # made multi-child bones (e.g. symmetric L/R face bones) far too long (first child is off to one
+        # side while the average sits near the head).
+        span = getattr(model, "span", 1.0) or 1.0
         for i in range(n):
-            d = math.sqrt(sum(c * c for c in rest_pos[kids[i][0]])) if kids[i] else 0.0
-            length[i] = d if d > 1e-4 else 0.05   # tiny/zero-offset connectors -> visible default, not a degenerate bone
+            d = _bvh_tail(i, hdr)
+            if d is None:
+                length[i] = 0.03 * span                    # leaf -> BVH End Site tip
+            else:
+                L = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+                length[i] = L if L > 1e-4 else 0.03 * span
 
         # animation: per-frame aim orientation -> parent-relative -> minus PreRotation (aim_f ready above)
         chan = {}
