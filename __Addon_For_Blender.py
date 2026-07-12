@@ -311,7 +311,49 @@ def _blender_rest_local(joint):
     return rl
 
 
-def build_armature(name, joints, extra_le=b""):
+def _bvh_tails_and_connect(joints, edit_bones, loc_bones):
+    """Re-shape an already-built armature so it looks like a Blender BVH import: each bone's TAIL goes
+    to the BVH tail (single child head / average of children / a 0.03*span tip for leaves, with
+    attachment stubs collapsed onto the primary child), and single-child chains are CONNECTED — except
+    bones that translate (loc animation), which stay unconnected so their motion still plays. Heads are
+    unchanged, so joint positions and the applied animation are untouched (only the display bones change)."""
+    n = len(joints)
+    kids = [[] for _ in range(n)]
+    for i, j in enumerate(joints):
+        if i != 0 and 0 <= j.parent < n and j.parent != i:
+            kids[j.parent].append(i)
+    sz = [1] * n
+    for i in range(n - 1, -1, -1):
+        for c in kids[i]:
+            sz[i] += sz[c]
+    heads = [edit_bones[i].head.copy() for i in range(n)]
+    mn = [min(h[k] for h in heads) for k in range(3)]
+    mx = [max(h[k] for h in heads) for k in range(3)]
+    span = max(mx[k] - mn[k] for k in range(3)) or 1.0
+    tiplen = 0.03 * span
+    for i in range(n):
+        b = edit_bones[i]
+        if not kids[i]:                                       # leaf -> BVH End Site tip along +Y
+            d = b.matrix.to_3x3().col[1].normalized()
+            if d.length < 1e-6:
+                d = mathutils.Vector((0.0, 1.0, 0.0))
+            b.tail = heads[i] + tiplen * d
+        else:
+            prim = max(kids[i], key=lambda c: sz[c])
+            acc = mathutils.Vector((0.0, 0.0, 0.0))
+            for c in kids[i]:
+                acc += heads[prim] if (c != prim and sz[c] <= 2 and sz[prim] >= 3 * sz[c]) else heads[c]
+            b.tail = acc / len(kids[i])
+        if (b.tail - b.head).length < 1e-5:                   # never a zero-length bone
+            b.tail = b.head + mathutils.Vector((0.0, tiplen, 0.0))
+    for i in range(n):                                        # connect rigid single-child chains
+        b = edit_bones[i]
+        if b.parent is not None and joints[i].name not in loc_bones \
+                and (b.head - b.parent.tail).length < 1e-4:
+            b.use_connect = True
+
+
+def build_armature(name, joints, extra_le=b"", bvh_like=False, loc_bones=frozenset()):
     arm = bpy.data.armatures.new("Armature_" + name)
     arm.display_type = 'STICK'
     arm_obj = bpy.data.objects.new(name, arm)
@@ -340,6 +382,8 @@ def build_armature(name, joints, extra_le=b""):
             if bone_dir.length < 1e-6:
                 bone_dir = mathutils.Vector((0.0, 1.0, 0.0))
             bone.tail = bone.head + 0.02 * bone_dir
+        if bvh_like:                                     # reshape to BVH-style connected/sized bones
+            _bvh_tails_and_connect(joints, arm.edit_bones, loc_bones)
     finally:
         bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -463,7 +507,7 @@ def _install_clips(operator, arm_obj, clips, fps, set_first_active=True):
 # ===========================================================================
 #  Import entry points
 # ===========================================================================
-def import_p3d(operator, filepath, fps, import_translation, import_scale):
+def import_p3d(operator, filepath, fps, import_translation, import_scale, bvh_like=False):
     want = ['rot']
     if import_translation:
         want.append('loc')
@@ -498,26 +542,30 @@ def import_p3d(operator, filepath, fps, import_translation, import_scale):
     if not skels:
         operator.report({'ERROR'}, "No skeleton (0x00023000) in file.")
         return {'CANCELLED'}
-    armatures = []                                     # (arm_obj, set(bone_names))
-    for nm, joints, extra in skels:
-        armatures.append((build_armature(nm, joints, extra), set(j.name for j in joints)))
-
+    # Route clips to skeletons FIRST (by bone-name coverage) — the BVH-like build needs to know which
+    # bones translate (loc) so it leaves them unconnected (a connected bone can't move in Blender).
+    skel_names = [set(j.name for j in js) for _nm, js, _ex in skels]
     anims = [c for c in iter_all_chunks(root) if c.chunk_id == 0x00121000
              and c.find_child(0x00121002) is not None]
-    buckets = [[] for _ in armatures]
+    buckets = [[] for _ in skels]
     unrouted = 0
     for a in anims:
         chanmap = decode_clip_channels(a, want=want)
         if not chanmap:
             continue
         clip_bones = set(chanmap)
-        # pick the skeleton that covers the most of this clip's bones (ties -> first skeleton)
-        scored = [(len(clip_bones & names), -i) for i, (_arm, names) in enumerate(armatures)]
+        scored = [(len(clip_bones & skel_names[i]), -i) for i in range(len(skels))]
         cov, negi = max(scored)
         if cov == 0:                                   # e.g. camera-only clips -> no skeleton
             unrouted += 1
             continue
         buckets[-negi].append((clip_name(a), chanmap))
+
+    armatures = []                                     # (arm_obj, set(bone_names))
+    for (nm, joints, extra), bucket, names in zip(skels, buckets, skel_names):
+        loc_bones = frozenset(b for _cn, cm in bucket for b, sl in cm.items() if 'loc' in sl) \
+            if bvh_like else frozenset()
+        armatures.append((build_armature(nm, joints, extra, bvh_like=bvh_like, loc_bones=loc_bones), names))
 
     total = 0
     for (arm, _names), bucket in zip(armatures, buckets):
@@ -529,7 +577,7 @@ def import_p3d(operator, filepath, fps, import_translation, import_scale):
     return {'FINISHED'}
 
 
-def import_json(operator, filepath, fps, import_translation, import_scale):
+def import_json(operator, filepath, fps, import_translation, import_scale, bvh_like=False):
     try:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -549,8 +597,6 @@ def import_json(operator, filepath, fps, import_translation, import_scale):
                                        "re-export from pure3d_anim_viewer.")
             return {'CANCELLED'}
         joints.append(Joint(j["name"], int(j.get("parent", -1)), [float(x) for x in local]))
-    arm_obj = build_armature(sk.get("name", "Pure3D"), joints)
-
     clip = data.get("clip", {})
     chan = clip.get("channels", {})
     want = {'rot'}
@@ -570,6 +616,8 @@ def import_json(operator, filepath, fps, import_translation, import_scale):
                 sd[slot] = (frames, vals)
         if sd:
             chanmap[bone] = sd
+    loc_bones = frozenset(b for b, sl in chanmap.items() if 'loc' in sl) if bvh_like else frozenset()
+    arm_obj = build_armature(sk.get("name", "Pure3D"), joints, bvh_like=bvh_like, loc_bones=loc_bones)
     made = _install_clips(operator, arm_obj, [(clip.get("name", "clip"), chanmap)],
                           clip.get("fps", fps))
     operator.report({'INFO'}, "Imported skeleton '%s' + %d clip from JSON."
@@ -856,6 +904,10 @@ class _CommonProps:
                                      description="Keyframe TRAN channels onto bone location")
     import_scale: BoolProperty(name="Import Scale", default=True,
                                description="Keyframe SCL channels onto bone scale")
+    bvh_like: BoolProperty(name="BVH-like bones", default=False,
+                           description="Build the armature like a BVH import: bones aim at their "
+                                       "children (connected octahedral bones) with BVH bone sizes, "
+                                       "instead of the game's rest orientation with tiny stub tails")
 
 
 class IMPORT_OT_pure3d_p3d(bpy.types.Operator, ImportHelper, _CommonProps):
@@ -866,7 +918,8 @@ class IMPORT_OT_pure3d_p3d(bpy.types.Operator, ImportHelper, _CommonProps):
     filter_glob: StringProperty(default="*.p3d", options={'HIDDEN'})
 
     def execute(self, context):
-        return import_p3d(self, self.filepath, self.fps, self.import_translation, self.import_scale)
+        return import_p3d(self, self.filepath, self.fps, self.import_translation, self.import_scale,
+                          self.bvh_like)
 
 
 class IMPORT_OT_pure3d_json(bpy.types.Operator, ImportHelper, _CommonProps):
@@ -877,7 +930,8 @@ class IMPORT_OT_pure3d_json(bpy.types.Operator, ImportHelper, _CommonProps):
     filter_glob: StringProperty(default="*.json", options={'HIDDEN'})
 
     def execute(self, context):
-        return import_json(self, self.filepath, self.fps, self.import_translation, self.import_scale)
+        return import_json(self, self.filepath, self.fps, self.import_translation, self.import_scale,
+                           self.bvh_like)
 
 
 class EXPORT_OT_pure3d_p3d(bpy.types.Operator, ExportHelper):

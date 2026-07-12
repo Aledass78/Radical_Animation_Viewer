@@ -98,6 +98,14 @@ rest pose**, use the bundled add-on: **Edit ▸ Preferences ▸ Add-ons ▸ Inst
 - **File ▸ Export ▸ Pure3D Animation (.p3d)** — writes the selected armature(s) + their Actions back
   to a `.p3d` (skeleton + inline animation clips).
 
+**"BVH-like bones" import option.** Both importers have a checkbox. Off (default) = the game's rest
+orientation with tiny stub tails. On = the armature is reshaped like a Blender BVH import: each bone
+aims at its child (or the average of children, with attachment stubs collapsed onto the primary), so
+you get **connected octahedral bones at the exact BVH sizes** — built directly in Blender, so the sizes
+are exact (no FBX "Size" guessing, no fat facial bones). Bones that translate (e.g. `Character_Root`)
+stay unconnected so their motion still plays. Joint positions and the animation are unchanged — only
+the display bones differ.
+
 Both rebuild the skeleton with the game's actual rest orientation, so the bind pose matches the game
 (no BVH offset-only stick skeleton). Self-contained pure Python — no DLLs.
 
