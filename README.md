@@ -106,10 +106,13 @@ clips; the importer builds **one armature per skeleton** and routes each clip to
 bones it drives (best coverage). Camera-only clips (no skeletal bones) are skipped.
 
 **Export note.** The exported clips are byte-exact (same writer as the desktop tool). The **skeleton**
-it writes is readable by these tools (correct rest matrices, verified round-trip) but does **not**
-reproduce the game's extra per-joint data / bone-group / IK sub-chunks — so it's meant for the
-Blender → edit → `.p3d` → **inject into a game character file** workflow (via the desktop tool's
-Replace), not as a drop-in replacement game skeleton. Untested in-game.
+it writes has correct rest matrices (verified round-trip) and now **preserves the source's bone-group
+masks (`0x23002`) and leg mirror map (`0x23003`)** — the sub-chunks the game uses for partial-body
+blending, mirroring, and leg IK. These are captured verbatim on import and re-attached on export, but
+**only when the bone order is unchanged** (their bitmasks are joint-index-based, so reordering/adding
+bones drops them to avoid pointing at the wrong joints); they also require a little-endian (PC) source.
+Other per-joint extras are still not reproduced, so it remains best for the Blender → edit → `.p3d` →
+**inject into a game character file** workflow (via the desktop tool's Replace). Untested in-game.
 
 **Attachment bones on export.** The non-deforming anchor bones (`*_Grapple`, `*_Con`) get parked by
 the game at an off-body point (where a held/thrown object goes) — often far from the character or

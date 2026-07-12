@@ -311,7 +311,7 @@ def _blender_rest_local(joint):
     return rl
 
 
-def build_armature(name, joints):
+def build_armature(name, joints, extra_le=b""):
     arm = bpy.data.armatures.new("Armature_" + name)
     arm.display_type = 'STICK'
     arm_obj = bpy.data.objects.new(name, arm)
@@ -344,6 +344,8 @@ def build_armature(name, joints):
         bpy.ops.object.mode_set(mode='OBJECT')
 
     arm_obj["bonenames"] = [j.name for j in joints]
+    if extra_le:                                     # 0x23002/0x23003 region masks — preserve for re-export
+        arm_obj["_p3d_skel_extra"] = extra_le.hex()
     return arm_obj
 
 
@@ -482,14 +484,23 @@ def import_p3d(operator, filepath, fps, import_translation, import_scale):
     # A .p3d can hold SEVERAL skeletons (e.g. a character + a prop/tricorder) and hundreds of clips.
     # Build one armature per skeleton, then route each clip to the skeleton whose bones it drives
     # (best bone-name coverage) — so multi-skeleton files import both and assign animations right.
-    skels = [parse_skeleton(c) for c in iter_all_chunks(root) if c.chunk_id == 0x00023000]
-    skels = [(nm, js) for nm, js in skels if js]
+    skels = []                                         # (name, joints, extra_le_bytes)
+    for c in iter_all_chunks(root):
+        if c.chunk_id != 0x00023000:
+            continue
+        nm, js = parse_skeleton(c)
+        if not js:
+            continue
+        # preserve the skeleton's bone-group masks (0x23002) + leg mirror map (0x23003) verbatim (LE)
+        extra = b"".join(_region_chunk_le(k) for k in c.children
+                         if k.chunk_id in (0x00023002, 0x00023003))
+        skels.append((nm, js, extra))
     if not skels:
         operator.report({'ERROR'}, "No skeleton (0x00023000) in file.")
         return {'CANCELLED'}
     armatures = []                                     # (arm_obj, set(bone_names))
-    for nm, joints in skels:
-        armatures.append((build_armature(nm, joints), set(j.name for j in joints)))
+    for nm, joints, extra in skels:
+        armatures.append((build_armature(nm, joints, extra), set(j.name for j in joints)))
 
     anims = [c for c in iter_all_chunks(root) if c.chunk_id == 0x00121000
              and c.find_child(0x00121002) is not None]
@@ -658,15 +669,27 @@ def build_clip(name, order, channels, num_frames, fps, be):
     return _serialize(0x00121000, ap, [header, bonelist, animtime], be)
 
 
-def write_skeleton(name, joints, be):
-    """joints = [(name, parent_index, local16_row_major)]. Readable by these tools; note the game's
-    own joints carry extra per-bone data + bone-group/IK sub-chunks not reproduced here."""
+def _region_chunk_le(chunk):
+    """Re-serialise a leaf skeleton region chunk (0x23002 bone-group mask / 0x23003 leg mirror) as
+    little-endian bytes for the (always-LE) export. Only LE sources are preserved: the payload is a
+    name + joint bitmask, and PS3/BE files pad the name differently, so a byte-swap can't be done
+    reliably without per-field parsing — safer to skip BE than to emit a wrong mask. Returns b'' for
+    BE sources."""
+    if chunk.big_endian:
+        return b""
+    return _serialize(chunk.chunk_id, chunk.data, [], False)   # verbatim (LE -> LE)
+
+
+def write_skeleton(name, joints, be, extra=b""):
+    """joints = [(name, parent_index, local16_row_major)]. `extra` = already-serialised leaf sub-chunks
+    to preserve verbatim under the skeleton (e.g. 0x23002 bone-group masks / 0x23003 leg mirror map,
+    which the game uses for partial-body blending / mirroring / leg IK)."""
     jchunks = []
     for jn, par, local in joints:
         payload = _aligned_str(jn) + _u32w(par, be) + b"".join(_f32w(x, be) for x in local)
         jchunks.append(_serialize(0x00023001, payload, [], be))
     sk = _aligned_str(name) + _u32w(1, be) + _u32w(len(joints), be) + _u32w(0, be) + _u32w(0, be)
-    return _serialize(0x00023000, sk, jchunks, be)
+    return _serialize(0x00023000, sk, jchunks + ([extra] if extra else []), be)
 
 
 def write_p3d(top_chunks, be=False):
@@ -712,7 +735,17 @@ def _export_armature(arm_obj, be, import_translation, import_scale):
         rest_rel = _rest_local_rel(pb)
         par = index[b.parent.name] if b.parent is not None else 0
         joints.append((b.name, par, _game_local_from_rest(rest_rel)))
-    sk_bytes = write_skeleton(arm_obj.name, joints, be)
+    # Re-attach preserved region masks (0x23002/0x23003) ONLY when the joint ORDER is unchanged —
+    # their bitmasks are index-based, so a reordered/edited skeleton would make them point at the
+    # wrong bones. `bonenames` was stashed at import in the original order.
+    extra = b""
+    stash = arm_obj.get("_p3d_skel_extra", "")
+    if stash and list(arm_obj.get("bonenames", [])) == [b.name for b in order]:
+        try:
+            extra = bytes.fromhex(stash)
+        except ValueError:
+            extra = b""
+    sk_bytes = write_skeleton(arm_obj.name, joints, be, extra)
     bone_names = [b.name for b in order]
 
     # collect actions: everything stashed on NLA + the active one
