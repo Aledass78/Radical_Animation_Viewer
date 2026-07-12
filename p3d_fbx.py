@@ -353,15 +353,20 @@ def export_fbx(model, clip_idx, path, fps=30, compat=False):
             gq, hd = _fk_world(lambda i, ff=f: model.local_matrix(clip_idx, i, ff))
             gq_f.append(gq); head_f.append(hd)
 
-        # A bone aims its +Y at its first child only when that child is RIGIDLY attached (constant
-        # distance across the clip). Root/pelvis connectors (e.g. Balance_Root -> Character_Root) let the
-        # child translate relative to them, so their aim direction sweeps and any fixed roll reference
-        # eventually aligns with it and pops ~90 deg. Those keep their stable game orientation instead
-        # (up_axis = -1); positions stay exact either way. Rigid limbs get a fixed rest-chosen roll axis
-        # whose alignment with the aim is constant, so they never go degenerate.
+        # A bone aims its +Y at its first child only when it has EXACTLY ONE child that is RIGIDLY
+        # attached (constant distance across the clip). Cases that keep their stable game orientation
+        # (up_axis = -1) instead:
+        #  * multi-child bones (Pelvis, Character_Root, spine/clavicle junctions): a bone can't point at
+        #    all its children, so aiming at an arbitrary first child tilts it (e.g. Pelvis -> Hip_L). They
+        #    can't connect to every child in Blender anyway, so keep them upright like the game/BVH.
+        #  * root/pelvis connectors whose child translates relative to them (e.g. Balance_Root ->
+        #    Character_Root): the aim sweeps and any fixed roll reference eventually aligns with it and
+        #    pops ~90 deg.
+        # Positions stay exact either way (a bone's own roll never affects joint positions). Single-child
+        # rigid limbs get a fixed rest-chosen roll axis whose alignment with the aim is constant.
         up_axis = [-1] * n
         for i in range(n):
-            if not kids[i]:
+            if len(kids[i]) != 1:
                 continue
             c = kids[i][0]
             dists = [math.dist(head_f[fi][i], head_f[fi][c]) for fi in range(len(frames))]

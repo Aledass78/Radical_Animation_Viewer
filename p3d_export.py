@@ -93,6 +93,28 @@ def export_bvh(model, clip_idx, path, fps=30, rest_bones=frozenset(), zup=False)
     # bones keep theirs too, but the value is constant = their offset, i.e. a zero position channel)
     has_pos = [(i == root) or ('loc' in model.channels_for(clip_idx, i)) for i in range(len(joints))]
 
+    # Attachment STUBS (Shield_*, *_Grapple, *_Con, Collar_*, ...) are extra children that drag their
+    # parent's imported bone tail off the real limb: Blender aims a multi-child bone at the AVERAGE of
+    # its children's heads, so e.g. Elbow lands between Forearm and Shield instead of snapping to the
+    # Forearm. We detect a stub as a leaf-ish child (tiny subtree) that has a much larger sibling, and
+    # snap its REST offset onto that primary sibling so the average collapses onto the real limb. The
+    # stub is forced to carry a POSITION channel, so its animation is unchanged (Blender uses the
+    # position channel as the local translation; the moved OFFSET only affects the edit-pose head/tail).
+    _sz = [1] * len(joints)
+    for i in range(len(joints) - 1, -1, -1):          # children come after parents in index order
+        for c in kids[i]:
+            _sz[i] += _sz[c]
+    snap_off = {}
+    for p in range(len(joints)):
+        ch = kids[p]
+        if len(ch) < 2:
+            continue
+        primary = max(ch, key=lambda c: _sz[c])
+        for c in ch:
+            if c != primary and _sz[c] <= 2 and _sz[primary] >= 3 * _sz[c]:
+                snap_off[c] = model.rest_offset(primary)
+                has_pos[c] = True
+
     order = []                                # DFS pre-order (== MOTION value order)
     lines = ["HIERARCHY"]
 
@@ -103,7 +125,7 @@ def export_bvh(model, clip_idx, path, fps=30, rest_bones=frozenset(), zup=False)
             # place the root by its position channel alone (ignoring the offset) drop the whole
             # character ~1 unit — legs end up below the floor in Blender.
             return (0.0, 0.0, 0.0)
-        o = model.rest_offset(i)
+        o = snap_off.get(i, model.rest_offset(i))     # attachment stubs snap onto their primary sibling
         return _m3v(_R90, o) if zup else o
 
     def emit(i, depth, is_root):
