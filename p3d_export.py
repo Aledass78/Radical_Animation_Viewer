@@ -144,7 +144,20 @@ def export_bvh(model, clip_idx, path, fps=30, rest_bones=frozenset(), zup=False)
             emit(c, depth + 1, False)
         if not kids[i]:                       # leaf -> End Site (small tip so the bone is visible)
             tip = 0.03 * model.span
-            tx, ty, tz = _m3v(_R90, (0.0, tip, 0.0)) if zup else (0.0, tip, 0.0)
+            # continue the bone (its offset from the parent), NOT local +Y — the game +Y on End bones is
+            # ~90 deg off and mirrored on the R side, so tips pointed the wrong way. The End Site is in
+            # the LEAF's own frame, so express the (parent-frame) offset there: R_local^-1 . offset.
+            o = model.rest_offset(i)
+            ol = math.sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2])
+            if ol > 1e-6:
+                u = (o[0] / ol, o[1] / ol, o[2] / ol)
+                R = model.rest_rot_trans(i)[0]            # game rest LOCAL rotation (flat9, column-vector)
+                d = ((R[0] * u[0] + R[3] * u[1] + R[6] * u[2]) * tip,   # R^T . u  (inverse rotation)
+                     (R[1] * u[0] + R[4] * u[1] + R[7] * u[2]) * tip,
+                     (R[2] * u[0] + R[5] * u[1] + R[8] * u[2]) * tip)
+            else:
+                d = (0.0, tip, 0.0)
+            tx, ty, tz = _m3v(_R90, d) if zup else d
             lines.append(f"{pad}\tEnd Site")
             lines.append(f"{pad}\t{{")
             lines.append(f"{pad}\t\tOFFSET {tx:.6f} {ty:.6f} {tz:.6f}")

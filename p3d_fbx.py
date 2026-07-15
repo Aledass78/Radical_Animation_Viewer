@@ -395,9 +395,16 @@ def export_fbx(model, clip_idx, path, fps=30, compat=False):
 
         Nb = [None] * n; C = [None] * n                   # N_bvh (rest orientation) + game->bvh reorient
         for i in range(n):
-            d = _bvh_tail(i, hdr) if _rigid(i) else None
+            p = joints[i].parent
+            if kids[i]:
+                d = _bvh_tail(i, hdr) if _rigid(i) else None
+            elif 0 <= p < n and p != i:                   # LEAF -> continue the parent's direction, NOT
+                d = (hdr[i][0] - hdr[p][0], hdr[i][1] - hdr[p][1],   # the game +Y (which is ~85-95 deg off &
+                     hdr[i][2] - hdr[p][2])                          # mirrored -> fingertips/face/Ball point
+            else:                                                    # wrong; "match the game" = that garbage)
+                d = None
             if d is None or (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) < 1e-10:
-                Nb[i] = gqr[i]                             # leaf / non-rigid connector -> keep game orientation
+                Nb[i] = gqr[i]                             # non-rigid connector / root -> keep game orientation
             else:
                 a = _norm(d)
                 axes = (_qrotv(gqr[i], (1., 0., 0.)), _qrotv(gqr[i], (0., 1., 0.)), _qrotv(gqr[i], (0., 0., 1.)))
@@ -505,7 +512,10 @@ def export_fbx(model, clip_idx, path, fps=30, compat=False):
             P("FrontAxisSign", "int", "Integer", "", ('I', 1)),
             P("CoordAxis", "int", "Integer", "", ('I', 0)),
             P("CoordAxisSign", "int", "Integer", "", ('I', 1)),
-            P("UnitScaleFactor", "double", "Number", "", D(1)),
+            # FBX units are centimetres; 100 cm = 1 unit makes Blender import 1 game-unit = 1 m at
+            # object scale 1.0 (UnitScaleFactor=1 made Blender treat a unit as 1 cm -> whole rig 1/100).
+            P("UnitScaleFactor", "double", "Number", "", D(100)),
+            P("OriginalUnitScaleFactor", "double", "Number", "", D(100)),
             P("TimeMode", "enum", "", "", ('I', timemode)),
             P("CustomFrameRate", "double", "Number", "", D(float(fps))),
             P("TimeSpanStart", "KTime", "Time", "", ('L', 0)),

@@ -99,12 +99,16 @@ rest pose**, use the bundled add-on: **Edit ▸ Preferences ▸ Add-ons ▸ Inst
   to a `.p3d` (skeleton + inline animation clips).
 
 **"BVH-like bones" import option.** Both importers have a checkbox. Off (default) = the game's rest
-orientation with tiny stub tails. On = the armature is reshaped like a Blender BVH import: each bone
-aims at its child (or the average of children, with attachment stubs collapsed onto the primary), so
-you get **connected octahedral bones at the exact BVH sizes** — built directly in Blender, so the sizes
-are exact (no FBX "Size" guessing, no fat facial bones). Bones that translate (e.g. `Character_Root`)
-stay unconnected so their motion still plays. Joint positions and the animation are unchanged — only
-the display bones differ.
+orientation with tiny stub tails. On = the armature is reshaped and driven exactly like a Blender BVH
+import: each bone aims at its child (or the average of children, with attachment stubs collapsed onto
+the primary), so you get **connected octahedral bones at the exact BVH sizes** — built directly in
+Blender, so the sizes are exact (no FBX "Size" guessing, no fat facial bones), and single-child chains
+are **connected** just like a `.bvh`. The animation is applied by a per-frame aim bake (FK the game
+pose, aim each bone at its child with a twist-preserving swing), which reproduces the exact in-game
+joint positions on the connected rig — **plus scale and the real in-game rest**, the two things a `.bvh`
+can't carry. Bones that translate (e.g. `Character_Root`) stay unconnected so their motion still plays,
+exactly as in a BVH. Verified to ~1e-5 across PC/PS3 alex and the scaled alex_boss. (Twist is
+swing-derived, same as a real BVH, not the raw game frame.)
 
 Both rebuild the skeleton with the game's actual rest orientation, so the bind pose matches the game
 (no BVH offset-only stick skeleton). Self-contained pure Python — no DLLs.

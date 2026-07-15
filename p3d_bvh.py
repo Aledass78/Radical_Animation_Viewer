@@ -266,8 +266,9 @@ def bvh_to_channels(bvh, rot=(0.0, 0.0, 0.0)):
     """-> (channels{bone:{'rot':(frames,quats), 'loc':(frames,xyz)}}, num_frames, fps).
 
     rot = the joint's parent-local rotation quaternion (x,y,z,w) per frame.
-    loc = OFFSET + position-channels (absolute parent-local translation) — only for joints that
-    actually carry position channels (root, translated bones).
+    loc = the position channels, which already ARE the absolute parent-local translation (Blender /
+    export_bvh convention — the OFFSET is NOT added; see note below) — only for joints that actually
+    carry position channels (root, translated bones, snapped stubs).
     rot=(ax,ay,az) -- optional manual rotation (degrees about world X/Y/Z) applied to the whole
     animation (e.g. (-90,0,0) to stand up a Z-up source)."""
     joints = bvh["joints"]
@@ -294,7 +295,14 @@ def bvh_to_channels(bvh, rot=(0.0, 0.0, 0.0)):
                 px = row[cmap["Xposition"]] if "Xposition" in cmap else 0.0
                 py = row[cmap["Yposition"]] if "Yposition" in cmap else 0.0
                 pz = row[cmap["Zposition"]] if "Zposition" in cmap else 0.0
-                locs.append((ox + px, oy + py, oz + pz))
+                # The position channel IS the full absolute parent-local translation — do NOT add the
+                # OFFSET. Blender (and our export_bvh, tuned for it) treat position as the local
+                # translation (Blender computes `position - rest_head`, cancelling the OFFSET). Adding
+                # OFFSET here double-counted it, sinking every position-channel bone by its own offset
+                # (whole body by Character_Root's ~0.07; stubs Collar/Shield/Con by up to ~0.3), which
+                # dragged their whole subtree — e.g. the finger tips (Index_L_End). For a typical BVH the
+                # only position bone is the root with OFFSET 0, so this matches there too.
+                locs.append((px, py, pz))
         slots = {}
         if rot_chans:
             slots["rot"] = (frames, quats)
