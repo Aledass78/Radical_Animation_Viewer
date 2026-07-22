@@ -1058,13 +1058,26 @@ def _region_chunk_le(chunk):
     return _serialize(chunk.chunk_id, chunk.data, [], False)   # verbatim (LE -> LE)
 
 
+def _joint_trailer(be):
+    """The 54-byte per-joint DOF/scale/flags block that EVERY game joint carries after its rest matrix
+    (game joints are name+parentID+4x4 matrix+THIS = 135B; all 42,380 game joints have it). The game's
+    skeleton loader and Nixson's EditP3D both read it, so a joint without it fails to parse. It's a
+    'normal bone' default across the whole game: pivot (0,0,0), scale (1,1,1), 6 zero floats, flags."""
+    f0 = _f32w(0.0, be)
+    return (f0 * 3                                     # pivot (0,0,0)
+            + _f32w(1.0, be) * 3                       # scale (1,1,1)
+            + f0 * 6                                   # 6 zero floats
+            + struct.pack((">HHH" if be else "<HHH"), 1, 1, 0))   # flags: 01 00 01 00 00 00 (LE)
+
+
 def write_skeleton(name, joints, be, extra=b""):
     """joints = [(name, parent_index, local16_row_major)]. `extra` = already-serialised leaf sub-chunks
     to preserve verbatim under the skeleton (e.g. 0x23002 bone-group masks / 0x23003 leg mirror map,
     which the game uses for partial-body blending / mirroring / leg IK)."""
+    trailer = _joint_trailer(be)                       # the 54-byte block every game joint has
     jchunks = []
     for jn, par, local in joints:
-        payload = _aligned_str(jn) + _u32w(par, be) + b"".join(_f32w(x, be) for x in local)
+        payload = _aligned_str(jn) + _u32w(par, be) + b"".join(_f32w(x, be) for x in local) + trailer
         jchunks.append(_serialize(0x00023001, payload, [], be))
     sk = _aligned_str(name) + _u32w(1, be) + _u32w(len(joints), be) + _u32w(0, be) + _u32w(0, be)
     return _serialize(0x00023000, sk, jchunks + ([extra] if extra else []), be)
